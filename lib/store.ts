@@ -1,10 +1,7 @@
 import { PrevisaoEvent, PrevisaoScore } from './types';
+import { db } from './db';
 
-// Mock Data Initialization
-const MOCK_EVENTS_KEY = 'previsao_master_events';
-const MOCK_SCORES_KEY = 'previsao_master_scores';
-
-// Initial dummy data if empty
+// Initial dummy data if empty (fallback)
 const INITIAL_EVENTS: PrevisaoEvent[] = [
   {
     id: 'demo-event-1',
@@ -25,45 +22,57 @@ const INITIAL_EVENTS: PrevisaoEvent[] = [
 ];
 
 export const mockStore = {
-  getEvents: (): PrevisaoEvent[] => {
-    const stored = localStorage.getItem(MOCK_EVENTS_KEY);
-    if (!stored) {
-      localStorage.setItem(MOCK_EVENTS_KEY, JSON.stringify(INITIAL_EVENTS));
+  getEvents: async (): Promise<PrevisaoEvent[]> => {
+    const events = await db.getEvents();
+    if (events.length === 0) {
+      // Seed initial data if DB is empty
+      for (const evt of INITIAL_EVENTS) {
+        await db.saveEvent(evt);
+      }
       return INITIAL_EVENTS;
     }
-    return JSON.parse(stored);
+    return events;
   },
 
-  addEvent: (event: Omit<PrevisaoEvent, 'id' | 'createdAt'>) => {
-    const events = mockStore.getEvents();
+  getEventById: async (id: string): Promise<PrevisaoEvent | undefined> => {
+    const events = await db.getEvents();
+    return events.find(e => e.id === id);
+  },
+
+  addEvent: async (event: Omit<PrevisaoEvent, 'id' | 'createdAt'>) => {
     const newEvent: PrevisaoEvent = {
       ...event,
       id: `evt-${Date.now()}`,
       createdAt: Date.now(),
     };
-    events.push(newEvent);
-    localStorage.setItem(MOCK_EVENTS_KEY, JSON.stringify(events));
+    await db.saveEvent(newEvent);
     return newEvent;
   },
 
-  getScores: (): PrevisaoScore[] => {
-    const stored = localStorage.getItem(MOCK_SCORES_KEY);
-    return stored ? JSON.parse(stored) : [];
+  updateEvent: async (event: PrevisaoEvent) => {
+    await db.saveEvent(event);
+    return event;
   },
 
-  addScore: (score: Omit<PrevisaoScore, 'id' | 'createdAt'>) => {
-    const scores = mockStore.getScores();
+  deleteEvent: async (id: string) => {
+    await db.deleteEvent(id);
+  },
+
+  getScores: async (): Promise<PrevisaoScore[]> => {
+    return await db.getScores();
+  },
+
+  addScore: async (score: Omit<PrevisaoScore, 'id' | 'createdAt'>) => {
     const newScore: PrevisaoScore = {
       ...score,
       id: `score-${Date.now()}`,
       createdAt: Date.now(),
     };
-    scores.push(newScore);
-    localStorage.setItem(MOCK_SCORES_KEY, JSON.stringify(scores));
+    await db.saveScore(newScore);
     return newScore;
   },
 
-  clearScores: () => {
-    localStorage.removeItem(MOCK_SCORES_KEY);
+  clearScores: async () => {
+    await db.clearScores();
   }
 };

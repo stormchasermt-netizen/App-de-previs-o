@@ -1,31 +1,26 @@
-import React, { useEffect, useRef, useCallback } from 'react';
-import L from 'leaflet';
-import type { MapBounds, StormReport } from '@/lib/types';
+import React, { useEffect, useRef, useState } from 'react';
+import type { MapBounds, StormReport, RiskPolygon } from '@/lib/types';
+import { PREVISAO_SCORING, MAP_STYLE_DARK } from '@/lib/constants';
+import { normalizeReportType } from '@/lib/gameLogic';
 
-// Use CDN URLs for Leaflet markers
-const ICON_URL = 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png';
-const ICON_RETINA_URL = 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png';
-const SHADOW_URL = 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png';
-
-const DefaultIcon = L.icon({
-    iconUrl: ICON_URL,
-    iconRetinaUrl: ICON_RETINA_URL,
-    shadowUrl: SHADOW_URL,
-    iconSize: [25, 41],
-    iconAnchor: [12, 41],
-    popupAnchor: [1, -34],
-    shadowSize: [41, 41]
-});
-
-L.Marker.prototype.options.icon = DefaultIcon;
+declare const google: any;
 
 type GameMapProps = {
   bounds: MapBounds;
   layerImageUrl?: string | null;
   forecastMarker?: { lat: number; lng: number } | null;
   stormReports?: StormReport[];
+  riskPolygons?: RiskPolygon[];
   allowPlaceMarker: boolean;
   onPlaceMarker?: (lat: number, lng: number) => void;
+};
+
+// Color mapping for risk levels
+const RISK_COLORS = {
+    1: '#facc15', // Yellow (Nível 1)
+    2: '#fb923c', // Orange (Nível 2)
+    3: '#ef4444', // Red (Nível 3)
+    4: '#d946ef', // Pink (Nível 4)
 };
 
 export function GameMap({
@@ -33,214 +28,287 @@ export function GameMap({
   layerImageUrl,
   forecastMarker,
   stormReports = [],
+  riskPolygons = [],
   allowPlaceMarker,
   onPlaceMarker,
 }: GameMapProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const overlayRef = useRef<L.ImageOverlay | null>(null);
-  const forecastMarkerRef = useRef<L.Marker | null>(null);
-  const reportsLayerRef = useRef<L.LayerGroup | null>(null);
+  const mapRef = useRef<HTMLDivElement>(null);
+  const mapInstanceRef = useRef<any>(null);
+  
+  // References to active map objects to allow clearing them
+  const markersRef = useRef<any[]>([]);
+  const circleRef = useRef<any>(null);
+  const targetRef = useRef<any>(null);
+  const tracksRef = useRef<any[]>([]);
+  const polygonsRef = useRef<any[]>([]);
 
-  const initMap = useCallback(() => {
-    if (!containerRef.current || mapRef.current) return;
+  // Initialize Map
+  useEffect(() => {
+    let isMounted = true;
 
-    const map = L.map(containerRef.current, {
-      center: [-22, -60], // Centered roughly on South America
-      zoom: 3,
-      minZoom: 3,
-      maxZoom: 10,
-      zoomControl: false,
-      attributionControl: false
-    });
+    const initMap = async () => {
+        if (!mapRef.current) return;
 
-    // Dark Matter tile layer for that "Black Map" aesthetic
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', {
-      subdomains: 'abcd',
-      maxZoom: 20
-    }).addTo(map);
-    
-    // Add borders
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png', {
-      subdomains: 'abcd',
-      maxZoom: 20
-    }).addTo(map);
+        try {
+             // Wait for the Maps library to load
+            const { Map } = await google.maps.importLibrary("maps");
+            await google.maps.importLibrary("marker"); 
 
-    L.control.zoom({ position: 'bottomright' }).addTo(map);
+            if (!isMounted) return;
 
-    mapRef.current = map;
+            // Center roughly on South America initially
+            const map = new Map(mapRef.current, {
+                center: { lat: -25, lng: -55 },
+                zoom: 4,
+                disableDefaultUI: true, // Clean look
+                zoomControl: true, // Keep zoom
+                styles: MAP_STYLE_DARK, // Apply Dark Theme
+                backgroundColor: '#000000',
+                clickableIcons: false,
+            });
 
-    map.on('click', (e: L.LeafletMouseEvent) => {
-        if (allowPlaceMarker && onPlaceMarker) {
-             onPlaceMarker(e.latlng.lat, e.latlng.lng);
+            map.addListener('click', (e: any) => {
+                if (allowPlaceMarker && onPlaceMarker && e.latLng) {
+                    onPlaceMarker(e.latLng.lat(), e.latLng.lng());
+                }
+            });
+
+            // Cursor Styling
+            map.addListener('mouseover', () => {
+                map.setOptions({ draggableCursor: allowPlaceMarker ? 'crosshair' : 'grab' });
+            });
+
+            mapInstanceRef.current = map;
+            setMapReady(true);
+
+        } catch (error) {
+            console.error("Error loading Game Map:", error);
         }
-    });
-
-    // Force cursor style
-    const container = map.getContainer();
-    container.style.cursor = allowPlaceMarker ? 'crosshair' : 'grab';
-
-    // FIX: Force map resize calculation after init
-    setTimeout(() => {
-        map.invalidateSize();
-    }, 200);
-
-  }, [allowPlaceMarker, onPlaceMarker]);
-
-  // Update cursor when allowPlaceMarker changes
-  useEffect(() => {
-    if (mapRef.current) {
-        mapRef.current.getContainer().style.cursor = allowPlaceMarker ? 'crosshair' : 'grab';
-    }
-  }, [allowPlaceMarker]);
-
-  // FIX: Observer for container resize (fixes grey tiles on load)
-  useEffect(() => {
-    if (!containerRef.current || !mapRef.current) return;
-    
-    const resizeObserver = new ResizeObserver(() => {
-      mapRef.current?.invalidateSize();
-    });
-    
-    resizeObserver.observe(containerRef.current);
-    
-    return () => {
-      resizeObserver.disconnect();
     };
-  }, []);
 
-  useEffect(() => {
     initMap();
-    return () => {
-      if (mapRef.current) {
-        mapRef.current.remove();
-        mapRef.current = null;
+
+    return () => { isMounted = false; };
+  }, []); // Init once
+
+  const [mapReady, setMapReady] = useState(false);
+
+  // Handle allowPlaceMarker updates
+  useEffect(() => {
+      if(mapInstanceRef.current) {
+          mapInstanceRef.current.setOptions({ 
+              draggableCursor: allowPlaceMarker ? 'crosshair' : 'grab' 
+          });
       }
-    };
-  }, [initMap]);
+  }, [allowPlaceMarker, mapReady]);
 
-  // Update Overlay
+  // Handle Bounds & Reports Fitting
   useEffect(() => {
-    if (!mapRef.current) return;
+    if (!mapInstanceRef.current || !mapReady) return;
 
-    // Clean old
-    if (overlayRef.current) {
-      mapRef.current.removeLayer(overlayRef.current);
-      overlayRef.current = null;
-    }
-
-    const latLngBounds = L.latLngBounds(
-        [bounds.south, bounds.west], 
-        [bounds.north, bounds.east]
-    );
-
-    if (layerImageUrl) {
-      const overlay = L.imageOverlay(layerImageUrl, latLngBounds, {
-        opacity: 1,
-        interactive: false
-      });
-      overlay.addTo(mapRef.current);
-      overlayRef.current = overlay;
-    }
+    const googleBounds = new google.maps.LatLngBounds();
     
-    // Always fit bounds initially, but verify validity
-    if(latLngBounds.isValid()) {
-         mapRef.current.fitBounds(latLngBounds, { padding: [20, 20] });
+    // 1. Add Event Bounds
+    if (bounds) {
+        googleBounds.extend({ lat: bounds.south, lng: bounds.west });
+        googleBounds.extend({ lat: bounds.north, lng: bounds.east });
     }
 
-  }, [layerImageUrl, bounds]);
-
-  // Update Forecast Marker
-  useEffect(() => {
-    if (!mapRef.current) return;
-
-    if (forecastMarkerRef.current) {
-      mapRef.current.removeLayer(forecastMarkerRef.current);
-      forecastMarkerRef.current = null;
-    }
-    if (forecastMarker) {
-      const icon = L.divIcon({
-        className: 'target-marker',
-        html: `
-          <div style="position:relative; width:30px; height:30px; display:flex; align-items:center; justify-content:center;">
-             <div style="position:absolute; width:100%; height:1px; bg-color: #22d3ee; background: #22d3ee;"></div>
-             <div style="position:absolute; height:100%; width:1px; bg-color: #22d3ee; background: #22d3ee;"></div>
-             <div style="width:16px; height:16px; border: 2px solid #22d3ee; border-radius: 50%;"></div>
-          </div>
-        `,
-        iconSize: [30, 30],
-        iconAnchor: [15, 15],
-      });
-      const m = L.marker([forecastMarker.lat, forecastMarker.lng], { icon }).addTo(mapRef.current);
-      forecastMarkerRef.current = m;
-    }
-  }, [forecastMarker]);
-
-  // Update Reports (Tornadoes etc)
-  useEffect(() => {
-    if (!mapRef.current) return;
-
-    if (reportsLayerRef.current) {
-      mapRef.current.removeLayer(reportsLayerRef.current);
-      reportsLayerRef.current = null;
-    }
+    // 2. Add Reports to bounds if existing
     if (stormReports.length > 0) {
-      const group = L.layerGroup();
-      stormReports.forEach((r) => {
-        let svgShape = '';
-        let color = '';
-        
-        if (r.type === 'tornado') {
-            color = '#ef4444'; // Red
-            // Inverted Triangle
-            svgShape = `<svg width="20" height="20" viewBox="0 0 24 24" fill="${color}" stroke="white" stroke-width="2"><path d="M12 22L2 2h20L12 22z"/></svg>`;
-            
-            // Draw Track if exists
-            if (r.track && r.track.length > 1) {
-                const polyline = L.polyline(r.track, {
-                    color: '#ef4444',
-                    weight: 4,
-                    opacity: 0.6,
-                    lineCap: 'round'
-                });
-                polyline.addTo(group);
-            }
+        stormReports.forEach(r => googleBounds.extend({ lat: r.lat, lng: r.lng }));
+    }
 
-        } else if (r.type === 'vento') {
-            color = '#3b82f6'; // Blue
-            // Circle
-            svgShape = `<svg width="14" height="14" viewBox="0 0 24 24" fill="${color}" stroke="white" stroke-width="3"><circle cx="12" cy="12" r="10"/></svg>`;
-        } else if (r.type === 'granizo') {
-            color = '#22c55e'; // Green
-            // Diamond / Square rotated
-            svgShape = `<svg width="16" height="16" viewBox="0 0 24 24" fill="${color}" stroke="white" stroke-width="3"><rect x="5" y="5" width="14" height="14" transform="rotate(45 12 12)"/></svg>`;
+    // 3. Add Forecast if exists
+    if (forecastMarker) {
+        googleBounds.extend(forecastMarker);
+    }
+
+    if (!googleBounds.isEmpty()) {
+        mapInstanceRef.current.fitBounds(googleBounds, 50); // 50px padding
+    }
+
+  }, [bounds, stormReports, forecastMarker, mapReady]);
+
+  // Render Risk Polygons (Prevots)
+  useEffect(() => {
+      if (!mapInstanceRef.current || !mapReady) return;
+
+      // Clear old polygons
+      polygonsRef.current.forEach(p => p.setMap(null));
+      polygonsRef.current = [];
+
+      // Sort polygons by level (ascending) so lower levels are drawn first in DOM order too, 
+      // though zIndex handles the visual stacking.
+      const sortedPolygons = [...riskPolygons].sort((a, b) => a.level - b.level);
+
+      sortedPolygons.forEach(polyData => {
+          const color = RISK_COLORS[polyData.level] || '#ffffff';
+          
+          // Z-index logic: Higher levels sit on top of lower levels
+          // Level 1: 10, Level 2: 20, Level 3: 30, Level 4: 40
+          const zIndex = polyData.level * 10;
+
+          const polygon = new google.maps.Polygon({
+              paths: polyData.points,
+              strokeColor: color,
+              strokeOpacity: 0.8,
+              strokeWeight: 2,
+              fillColor: color,
+              fillOpacity: 0.35,
+              map: mapInstanceRef.current,
+              zIndex: zIndex 
+          });
+
+          polygonsRef.current.push(polygon);
+      });
+
+  }, [riskPolygons, mapReady]);
+
+
+  // Render Forecast Target (Bullseye + Green Circle)
+  useEffect(() => {
+    if (!mapInstanceRef.current || !mapReady) return;
+
+    // Define Symbol Here to ensure google.maps is loaded
+    const TARGET_SYMBOL = {
+        path: 'M 0,0 m -3,0 a 3,3 0 1,0 6,0 a 3,3 0 1,0 -6,0 M 0,-8 L 0,8 M -8,0 L 8,0',
+        strokeColor: '#000000',
+        strokeWeight: 2,
+        scale: 2
+    };
+
+    // Clear old
+    if (targetRef.current) { targetRef.current.setMap(null); targetRef.current = null; }
+    if (circleRef.current) { circleRef.current.setMap(null); circleRef.current = null; }
+
+    if (forecastMarker) {
+        // Draw 100km Circle (Green, Transparent)
+        const circle = new google.maps.Circle({
+            strokeColor: "#10b981", // Emerald 500
+            strokeOpacity: 0.8,
+            strokeWeight: 2,
+            fillColor: "#10b981",
+            fillOpacity: 0.25,
+            map: mapInstanceRef.current,
+            center: forecastMarker,
+            radius: PREVISAO_SCORING.RADIUS_KM * 1000,
+            clickable: false,
+        });
+        circleRef.current = circle;
+
+        // Draw Bullseye Target
+        const target = new google.maps.Marker({
+            position: forecastMarker,
+            map: mapInstanceRef.current,
+            icon: TARGET_SYMBOL,
+            zIndex: 999
+        });
+        targetRef.current = target;
+    }
+  }, [forecastMarker, mapReady]);
+
+  // Render Storm Reports
+  useEffect(() => {
+    if (!mapInstanceRef.current || !mapReady) return;
+
+    // Define Symbols Here
+    const SYMBOLS = {
+        TORNADO: {
+            path: 'M 0 0 L 6 -12 L -6 -12 Z', 
+            fillColor: '#ef4444',
+            fillOpacity: 1,
+            strokeColor: 'white',
+            strokeWeight: 1.5,
+            scale: 2.5 // Increased scale for visibility
+        },
+        WIND: {
+            path: 'M -5,-5 5,-5 5,5 -5,5 z',
+            fillColor: '#3b82f6',
+            fillOpacity: 1,
+            strokeColor: 'white',
+            strokeWeight: 1.5,
+            scale: 1
+        },
+        HAIL: {
+            path: google.maps.SymbolPath.CIRCLE,
+            fillColor: '#22c55e',
+            fillOpacity: 1,
+            strokeColor: 'white',
+            strokeWeight: 1.5,
+            scale: 6
+        }
+    };
+
+    // Clear old markers
+    markersRef.current.forEach(m => m.setMap(null));
+    markersRef.current = [];
+    
+    // Clear old tracks
+    tracksRef.current.forEach(t => t.setMap(null));
+    tracksRef.current = [];
+
+    stormReports.forEach(r => {
+        let icon: any = SYMBOLS.TORNADO; // Default
+        let zIndex = 100;
+
+        // Use strict normalization from logic
+        const type = normalizeReportType(r.type);
+
+        if (type === 'vento') {
+            icon = SYMBOLS.WIND;
+            zIndex = 90;
+        } else if (type === 'granizo') {
+            icon = SYMBOLS.HAIL;
+            zIndex = 90;
+        } else {
+            // It's a tornado
+            icon = SYMBOLS.TORNADO;
+            zIndex = 100;
         }
 
-        const icon = L.divIcon({
-          className: 'report-marker',
-          html: `<div style="display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 0 4px ${color});">${svgShape}</div>`,
-          iconSize: [20, 20],
-          iconAnchor: [10, 10],
+        // Draw Tracks (For Tornadoes)
+        if (type === 'tornado' && r.track && r.track.length > 1) {
+            // Shadow/Border Line
+            const borderLine = new google.maps.Polyline({
+                path: r.track,
+                geodesic: true,
+                strokeColor: '#000000',
+                strokeOpacity: 0.8,
+                strokeWeight: 6,
+                map: mapInstanceRef.current,
+                zIndex: 50
+            });
+            tracksRef.current.push(borderLine);
+
+            // Inner Color Line
+            const mainLine = new google.maps.Polyline({
+                path: r.track,
+                geodesic: true,
+                strokeColor: '#ef4444',
+                strokeOpacity: 1.0,
+                strokeWeight: 3,
+                map: mapInstanceRef.current,
+                zIndex: 51
+            });
+            tracksRef.current.push(mainLine);
+        }
+
+        // Draw Report Marker
+        const marker = new google.maps.Marker({
+            position: { lat: r.lat, lng: r.lng },
+            map: mapInstanceRef.current,
+            icon: icon,
+            title: `${type.toUpperCase()} ${r.rating || ''}`,
+            zIndex: zIndex
         });
-        
-        const marker = L.marker([r.lat, r.lng], { icon });
-        // Optional popup info
-        marker.bindPopup(`<b>${r.type.toUpperCase()}</b>${r.rating ? `<br/>${r.rating}` : ''}`);
-        marker.addTo(group);
-      });
-      group.addTo(mapRef.current);
-      reportsLayerRef.current = group;
-      
-      // If we have reports, fit bounds to show them + forecast
-      const reportBounds = L.latLngBounds(stormReports.map(r => [r.lat, r.lng]));
-      if (forecastMarker) reportBounds.extend([forecastMarker.lat, forecastMarker.lng]);
-      if (reportBounds.isValid()) {
-          mapRef.current.fitBounds(reportBounds, { padding: [50, 50], maxZoom: 8 });
-      }
-    }
-  }, [stormReports, forecastMarker]);
+
+        markersRef.current.push(marker);
+    });
+
+  }, [stormReports, mapReady]);
 
   return (
-    <div ref={containerRef} className="w-full h-full bg-black z-0 relative outline-none" style={{ background: '#000' }} />
+    <div ref={mapRef} className="w-full h-full bg-black" />
   );
 }

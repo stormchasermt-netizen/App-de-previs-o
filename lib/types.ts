@@ -1,3 +1,4 @@
+
 export type UserType = 'user' | 'admin' | 'superadmin';
 
 export interface AppUser {
@@ -36,6 +37,13 @@ export interface StormReport {
   track?: { lat: number; lng: number }[]; // Array of points defining the tornado path
 }
 
+export interface RiskPolygon {
+  id: string;
+  points: { lat: number; lng: number }[];
+  type: 'geral' | 'tornado' | 'vento' | 'granizo';
+  level: 1 | 2 | 3 | 4; // 1: Marginal, 2: Ligera, 3: Moderada, 4: Alta
+}
+
 export interface PrevisaoEvent {
   id: string;
   eventDate: string; // ISO String
@@ -44,6 +52,8 @@ export interface PrevisaoEvent {
   region: 'america_do_sul';
   layers: PrevisaoLayer[];
   stormReports: StormReport[];
+  riskPolygons?: RiskPolygon[]; // New: Prevots Polygons
+  reportMapUrl?: string; // New: Reference Image URL
   bounds: MapBounds;
   active: boolean;
   createdAt: number;
@@ -64,5 +74,34 @@ export interface PrevisaoScore {
   streakBonus: number;
   finalScore: number;
   streakCount: number;
+  createdAt: number;
+}
+
+// MULTIPLAYER TYPES
+
+export type LobbyStatus = 'waiting' | 'playing' | 'round_results' | 'finished';
+
+export interface LobbyPlayer {
+  uid: string;
+  displayName: string;
+  photoURL?: string;
+  isHost: boolean;
+  isReady: boolean;
+  hasSubmitted: boolean;
+  totalScore: number;
+  lastRoundScore: number;
+  lastRoundDistance: number;
+  streakCount: number;
+}
+
+export interface Lobby {
+  code: string;
+  hostId: string;
+  status: LobbyStatus;
+  players: LobbyPlayer[];
+  currentEventId: string | null;
+  difficulty: PrevisaoDifficulty;
+  roundEndTime: number | null; // Timestamp for forced finish
+  roundsPlayed: number;
   createdAt: number;
 }

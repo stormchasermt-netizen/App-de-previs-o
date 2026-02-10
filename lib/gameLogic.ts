@@ -1,10 +1,6 @@
 import { PREVISAO_SCORING } from './constants';
 import type { StormReport, PrevisaoDifficulty } from './types';
 
-export function kmToMiles(km: number): number {
-  return km / PREVISAO_SCORING.MILES_TO_KM;
-}
-
 export function distanceKm(
   lat1: number,
   lng1: number,
@@ -29,18 +25,14 @@ export function minDistanceToReports(
   forecastLng: number,
   reports: StormReport[]
 ): number {
-  if (reports.length === 0) return 0;
+  if (reports.length === 0) return 99999;
   return Math.min(
     ...reports.map((r) => distanceKm(forecastLat, forecastLng, r.lat, r.lng))
   );
 }
 
-export function basePointsFromDistanceMiles(miles: number): number {
-  if (miles <= PREVISAO_SCORING.MAX_DISTANCE_MILES) return PREVISAO_SCORING.BASE_MAX;
-  const maxMilesForPoints = 5000;
-  if (miles >= maxMilesForPoints) return 0;
-  const slope = PREVISAO_SCORING.BASE_MAX / (maxMilesForPoints - PREVISAO_SCORING.MAX_DISTANCE_MILES);
-  return Math.round(Math.max(0, PREVISAO_SCORING.BASE_MAX - slope * (miles - PREVISAO_SCORING.MAX_DISTANCE_MILES)));
+export function isGoodForecastForStreak(distanceKm: number): boolean {
+  return distanceKm <= PREVISAO_SCORING.STREAK_THRESHOLD_KM;
 }
 
 export function streakBonusPercent(streakCount: number): number {
@@ -49,29 +41,128 @@ export function streakBonusPercent(streakCount: number): number {
   return Math.min(PREVISAO_SCORING.STREAK_BONUS_MAX, (streakCount / 7) * PREVISAO_SCORING.STREAK_BONUS_MAX);
 }
 
+/**
+ * HELPER: Normalize Report Type
+ * CRITICAL FIX: Default must be 'vento' (low score). 
+ * Only return 'tornado' if explicitly detected.
+ */
+export function normalizeReportType(rawType?: string): 'tornado' | 'vento' | 'granizo' {
+    const t = rawType ? rawType.toLowerCase().trim() : '';
+    
+    // Explicit Tornado Check
+    if (t.includes('tornado') || t.includes('torn') || t.includes('landspout')) return 'tornado';
+    
+    // Explicit Hail Check
+    if (t.includes('granizo') || t.includes('hail')) return 'granizo';
+    
+    // Default fallback (Wind/Unknown) - Safer for scoring
+    return 'vento'; 
+}
+
+/**
+ * NEW SCORING ALGORITHM
+ * 
+ * Major Adjustments:
+ * 1. "Highlander Rule": If there is a Tornado, NOTHING else matters for Precision score.
+ * 2. Cluster Score: heavily nerved for non-tornadoes.
+ */
 export function computeScore(
-  distanceKm: number,
+  forecastLat: number,
+  forecastLng: number,
+  reports: StormReport[],
   difficulty: PrevisaoDifficulty,
   streakCount: number
 ): {
   basePoints: number;
+  precisionScore: number;
+  clusterScore: number;
+  reportsCaught: number;
   difficultyMultiplier: number;
   streakBonus: number;
   finalScore: number;
+  minDistance: number;
 } {
-  const miles = kmToMiles(distanceKm);
-  const basePoints = basePointsFromDistanceMiles(miles);
-  const mult = PREVISAO_SCORING.MULTIPLIERS[difficulty];
-  const streakBonus = streakBonusPercent(streakCount);
-  const finalScore = Math.round(basePoints * mult * (1 + streakBonus));
-  return {
-    basePoints,
-    difficultyMultiplier: mult,
-    streakBonus,
-    finalScore,
-  };
-}
+  const maxRange = PREVISAO_SCORING.RADIUS_KM; // 100km
 
-export function isGoodForecastForStreak(distanceKm: number): boolean {
-  return kmToMiles(distanceKm) <= PREVISAO_SCORING.STREAK_THRESHOLD_MILES;
+  // 1. Analyze Event Composition
+  let hasTornado = false;
+  let minDistanceToAnyTornado = 99999;
+  let minDistanceToAny = 99999;
+
+  // Pre-process reports with normalized types
+  const processedReports = reports.map(r => {
+      const type = normalizeReportType(r.type);
+      const dist = distanceKm(forecastLat, forecastLng, r.lat, r.lng);
+      
+      if (dist < minDistanceToAny) minDistanceToAny = dist;
+      
+      if (type === 'tornado') {
+          hasTornado = true;
+          if (dist < minDistanceToAnyTornado) minDistanceToAnyTornado = dist;
+      }
+      return { ...r, type, dist }; // normalized
+  });
+
+  // 2. Calculate Precision Score
+  // If a tornado exists, we ONLY calculate precision based on tornadoes.
+  // This prevents "farming" points by landing on a wind report when the objective was a tornado.
+  let bestPrecisionScore = 0;
+
+  processedReports.forEach(r => {
+      // Logic: If event has tornado, ignore non-tornadoes for precision calculation
+      if (hasTornado && r.type !== 'tornado') return;
+
+      if (r.dist < maxRange) {
+          // Non-linear decay: (1 - dist/100)^3 (Sharper decay)
+          const decayFactor = Math.pow(1 - (r.dist / maxRange), 3);
+          
+          const weight = PREVISAO_SCORING.REPORT_WEIGHTS[r.type];
+          const points = PREVISAO_SCORING.PRECISION_MAX_POINTS * decayFactor * weight;
+          
+          if (points > bestPrecisionScore) {
+              bestPrecisionScore = points;
+          }
+      }
+  });
+
+  // 3. Cluster Score (The "Circle")
+  let clusterScore = 0;
+  let reportsCaught = 0;
+
+  processedReports.forEach(r => {
+    if (r.dist <= maxRange) {
+      reportsCaught++;
+      // Linear decay for cluster points
+      const decayFactor = 1 - (r.dist / maxRange);
+      
+      // Apply Weight based on type
+      const weight = PREVISAO_SCORING.REPORT_WEIGHTS[r.type];
+
+      clusterScore += PREVISAO_SCORING.CLUSTER_PER_REPORT_MAX * decayFactor * weight;
+    }
+  });
+
+  // 4. Final Distance Determination (Strict Geometry)
+  let finalMinDistance = hasTornado ? minDistanceToAnyTornado : minDistanceToAny;
+
+  // Combine Base
+  const rawBase = bestPrecisionScore + clusterScore;
+  
+  // Multipliers
+  const diffMult = PREVISAO_SCORING.MULTIPLIERS[difficulty];
+  const streakBonusPct = streakBonusPercent(streakCount);
+
+  // Final Calc
+  const finalScore = Math.round(rawBase * diffMult * (1 + streakBonusPct));
+
+  return {
+    basePoints: Math.round(rawBase),
+    precisionScore: Math.round(bestPrecisionScore),
+    clusterScore: Math.round(clusterScore),
+    reportsCaught,
+    minDistance: finalMinDistance,
+    difficultyMultiplier: diffMult,
+    streakBonus: streakBonusPct,
+    finalScore
+  };
 }

@@ -79,19 +79,42 @@ export default function Rules() {
         <section className="bg-gradient-to-r from-slate-900 to-slate-800 border border-white/10 p-8 rounded-2xl">
              <div className="flex items-center gap-3 mb-6">
                 <Trophy className="text-yellow-400 h-6 w-6" />
-                <h2 className="text-2xl font-bold text-white">Como Funciona a Pontuação</h2>
+                <h2 className="text-2xl font-bold text-white">Novo Sistema de Pontuação (Alvo + Área)</h2>
             </div>
             
             <div className="space-y-4 text-slate-300">
-                <p>Sua pontuação é baseada na proximidade da sua previsão ao relato de tornado mais próximo:</p>
-                <ul className="space-y-2 list-disc list-inside ml-4">
-                    <li><strong className="text-white">Distância:</strong> 0-5000 pontos base. Previsões mais próximas pontuam mais. Estar dentro de 25 milhas garante a pontuação máxima.</li>
-                    <li><strong className="text-white">Multiplicador de Dificuldade:</strong> Aplica-se sobre os pontos base (60%, 80%, 100%, 120%).</li>
-                    <li><strong className="text-white">Bônus de Sequência (Streak):</strong> Previsões boas consecutivas (dentro de 100 milhas) aumentam sua pontuação. Uma sequência de 7+ jogos adiciona 30% à sua pontuação.</li>
+                <p>Sua pontuação final é a soma de dois componentes principais:</p>
+                
+                <div className="grid md:grid-cols-2 gap-6 mt-4 mb-6">
+                    <div className="bg-black/30 p-4 rounded-lg border border-white/5">
+                        <h3 className="text-emerald-400 font-bold mb-2">1. Pontos de Precisão (O Ponto)</h3>
+                        <p className="text-sm">
+                            Baseado unicamente na distância do seu alvo para o <strong>relato de tornado mais próximo</strong>.
+                        </p>
+                        <ul className="text-xs mt-2 list-disc list-inside text-slate-400">
+                            <li>0 km = Pontuação Máxima (3000 pts)</li>
+                            <li>A pontuação cai drasticamente à medida que você se afasta.</li>
+                            <li>Acima de 100km = 0 pontos de precisão.</li>
+                        </ul>
+                    </div>
+
+                    <div className="bg-black/30 p-4 rounded-lg border border-white/5">
+                        <h3 className="text-cyan-400 font-bold mb-2">2. Pontos de Área (O Círculo)</h3>
+                        <p className="text-sm">
+                            Seu alvo gera um <strong>círculo de 100km</strong> de raio. Você ganha pontos por <strong>CADA relato</strong> que cair dentro deste círculo.
+                        </p>
+                        <ul className="text-xs mt-2 list-disc list-inside text-slate-400">
+                            <li>Recompensa a previsão de agrupamentos (outbreaks).</li>
+                            <li>Relatos mais próximos do centro do círculo valem mais.</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <p className="text-sm font-bold text-white">Bônus Adicionais:</p>
+                <ul className="space-y-2 list-disc list-inside ml-4 text-sm">
+                    <li><strong className="text-white">Multiplicador de Dificuldade:</strong> Aplica-se sobre o total (60% a 120%).</li>
+                    <li><strong className="text-white">Bônus de Sequência (Streak):</strong> Previsões consecutivas com erro menor que 100km aumentam sua pontuação em até 30%.</li>
                 </ul>
-                <p className="text-sm text-slate-400 mt-4 italic">
-                    Nota: A pontuação máxima possível na dificuldade Mestre com uma longa sequência é de 7.800 pontos.
-                </p>
             </div>
         </section>
 

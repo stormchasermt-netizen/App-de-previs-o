@@ -2,19 +2,19 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
+import { useMultiplayer } from '@/contexts/MultiplayerContext';
 import { GameMap } from '@/components/GameMap';
 import { mockStore } from '@/lib/store';
 import {
-  minDistanceToReports,
   computeScore,
   isGoodForecastForStreak,
 } from '@/lib/gameLogic';
 import { LAYER_CATEGORIES, PREDEFINED_LAYERS, LAYER_TIMES } from '@/lib/constants';
-import type { PrevisaoEvent, PrevisaoDifficulty, PrevisaoLayer } from '@/lib/types';
+import type { PrevisaoEvent, PrevisaoDifficulty } from '@/lib/types';
 import { 
   Loader2, Send, Shuffle, Target, Map as MapIcon, 
-  ChevronLeft, Lock, Trophy, Play, Settings, BarChart2,
-  Calendar, CheckCircle, Lightbulb, X, ZoomIn, AlertCircle, Crosshair, ArrowLeft, ArrowRight, RotateCcw
+  ChevronLeft, Lock, Trophy, RotateCcw,
+  Lightbulb, X, AlertCircle, Crosshair, ArrowLeft, ArrowRight, Settings, Users, Clock, Menu, ChevronDown, ListOrdered, ZoomIn
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -37,20 +37,25 @@ type GamePhase = 'setup' | 'loading' | 'playing' | 'result';
 export default function Game() {
   const { user } = useAuth();
   const { addToast } = useToast();
+  const { lobby, currentEventData, submitRoundScore, triggerForceFinish } = useMultiplayer();
   const navigate = useNavigate();
   
+  // Logic to determine if we are in multiplayer mode
+  const isMultiplayer = !!lobby && (lobby.status === 'playing' || lobby.status === 'round_results');
+
   // Data
   const [events, setEvents] = useState<PrevisaoEvent[]>([]);
   
   // State
-  const [phase, setPhase] = useState<GamePhase>('setup');
+  const [phase, setPhase] = useState<GamePhase>(isMultiplayer ? 'loading' : 'setup');
   const [difficulty, setDifficulty] = useState<PrevisaoDifficulty>('iniciante');
   const [currentEvent, setCurrentEvent] = useState<PrevisaoEvent | null>(null);
   
   // Selection State
-  const [selectedParamId, setSelectedParamId] = useState<string | null>('spc_temp_dewpoint'); 
+  const [selectedParamId, setSelectedParamId] = useState<string | null>('spc_temperature'); 
   const [timeIndex, setTimeIndex] = useState<number>(4); // 12Z
   const [showYear, setShowYear] = useState(false);
+  const [showMobileParams, setShowMobileParams] = useState(false); // New Mobile State
   
   // Game Interaction
   const [forecast, setForecast] = useState<{ lat: number; lng: number } | null>(null);
@@ -60,17 +65,100 @@ export default function Game() {
   const [tempForecast, setTempForecast] = useState<{ lat: number; lng: number } | null>(null);
   const [showConfirmationDialog, setShowConfirmationDialog] = useState(false);
   
+  // Result Image Zoom
+  const [isReferenceImageZoomed, setIsReferenceImageZoomed] = useState(false);
+
   // Scoring
   const [sessionStreak, setSessionStreak] = useState(0);
   const [currentScore, setCurrentScore] = useState(0);
   const [result, setResult] = useState<any>(null);
 
-  // Load events initially
+  // Multiplayer Specific
+  const [hasSubmittedMP, setHasSubmittedMP] = useState(false);
+  const [roundTimer, setRoundTimer] = useState<number | null>(null);
+
+  // Load events initially (Only for Solo mode fallback)
   useEffect(() => {
-    // Only load active events
-    const list = mockStore.getEvents().filter(e => e.active);
-    setEvents(list);
-  }, []);
+    if (!isMultiplayer) {
+        const fetchEvents = async () => {
+             const all = await mockStore.getEvents();
+             setEvents(all.filter(e => e.active));
+        };
+        fetchEvents();
+    }
+  }, [isMultiplayer]);
+
+  // MULTIPLAYER: Sync with Lobby Status & Event ID
+  useEffect(() => {
+    // If lobby finished, kick out
+    if (lobby && lobby.status === 'finished') {
+        navigate('/lobby-leaderboard');
+        return;
+    }
+
+    // 1. GAME START SYNC
+    if (lobby && lobby.status === 'playing') {
+        setDifficulty(lobby.difficulty);
+        
+        if (currentEventData) {
+            // Check if we are already playing this event to avoid reset
+            if (currentEvent?.id !== currentEventData.id) {
+                setPhase('loading');
+                setCurrentEvent(currentEventData);
+                
+                // Reset Local State
+                setForecast(null);
+                setTempForecast(null);
+                setHasSubmittedMP(false);
+                setShowConfirmationDialog(false);
+                setResult(null);
+                setShowYear(false);
+                setIsTargetModalOpen(false);
+                setTimeIndex(4);
+                setSelectedParamId('spc_temperature');
+                setShowMobileParams(false);
+                setIsReferenceImageZoomed(false);
+                
+                setTimeout(() => setPhase('playing'), 1000);
+            }
+        }
+    } 
+
+    // 2. ROUND END SYNC
+    // Instead of navigating away immediately, we show the Result screen locally
+    if (lobby && lobby.status === 'round_results') {
+        if (phase !== 'result') {
+            setPhase('result');
+            setHasSubmittedMP(false); // Reset submit flag so we don't show "Waiting" overlay on result screen
+        }
+    }
+
+  }, [lobby, navigate, currentEvent, currentEventData, phase]);
+
+  // MULTIPLAYER: Handle Round Timer (15s finish)
+  useEffect(() => {
+      // Only run timer if playing
+      if (!isMultiplayer || !lobby?.roundEndTime || lobby.status !== 'playing') {
+          setRoundTimer(null);
+          return;
+      }
+
+      const interval = setInterval(() => {
+          const left = Math.ceil((lobby.roundEndTime! - Date.now()) / 1000);
+          if (left <= 0) {
+              setRoundTimer(0);
+              clearInterval(interval);
+              if (!hasSubmittedMP) {
+                  handleForceSubmitFailure();
+              }
+          } else {
+              setRoundTimer(left);
+          }
+      }, 1000);
+
+      return () => clearInterval(interval);
+  }, [lobby?.roundEndTime, lobby?.status, isMultiplayer, hasSubmittedMP]);
+
 
   const activeLayer = useMemo(() => {
     if (!currentEvent || !selectedParamId) return null;
@@ -93,7 +181,7 @@ export default function Game() {
 
   const startLoading = (diff: PrevisaoDifficulty) => {
     if (events.length === 0) {
-        addToast('Nenhum evento disponível no sistema. Peça ao admin para criar eventos.', 'error');
+        addToast('Nenhum evento disponível no sistema. Aguarde o carregamento ou peça ao admin.', 'error');
         return;
     }
     setDifficulty(diff);
@@ -122,10 +210,11 @@ export default function Game() {
     setResult(null);
     setShowYear(false);
     setIsTargetModalOpen(false);
+    setIsReferenceImageZoomed(false);
     
     setCurrentEvent(eventToPlay);
     setTimeIndex(4); // 12Z
-    setSelectedParamId('spc_temp_dewpoint');
+    setSelectedParamId('spc_temperature');
     setPhase('playing');
   };
 
@@ -154,45 +243,93 @@ export default function Game() {
     setShowConfirmationDialog(false);
   };
 
-  const handleSubmit = () => {
+  const handleParameterSelect = (id: string) => {
+      setSelectedParamId(id);
+      setShowMobileParams(false); // Auto close on mobile
+  };
+
+  const handleSubmit = async () => {
     if (!forecast || !currentEvent) {
         addToast('Defina um alvo primeiro!', 'error');
         return;
     }
     
-    const distanceKm = minDistanceToReports(forecast.lat, forecast.lng, currentEvent.stormReports);
-    const goodForStreak = isGoodForecastForStreak(distanceKm);
-    const nextStreak = goodForStreak ? sessionStreak + 1 : 0;
-    const computed = computeScore(distanceKm, difficulty, nextStreak);
+    // New Score Logic
+    const computed = computeScore(
+        forecast.lat, 
+        forecast.lng, 
+        currentEvent.stormReports, 
+        difficulty, 
+        sessionStreak
+    );
 
+    const goodForStreak = isGoodForecastForStreak(computed.minDistance);
+    const nextStreak = goodForStreak ? sessionStreak + 1 : 0;
+    
     const resultData = {
         ...computed,
-        distanceKm,
+        distanceKm: computed.minDistance,
         streakCount: nextStreak,
     };
-
+    
+    // Always set result locally so we can show it later
     setResult(resultData);
-    setSessionStreak(nextStreak);
-    setCurrentScore(prev => prev + computed.finalScore);
-    
-    // Save Score
-    if (user) {
-        mockStore.addScore({
-            userId: user.uid,
-            displayName: user.displayName,
-            photoURL: user.photoURL,
-            eventId: currentEvent.id,
-            difficulty: difficulty,
-            forecastLat: forecast.lat,
-            forecastLng: forecast.lng,
-            distanceKm,
-            streakCount: nextStreak,
-            ...computed
-        });
+
+    if (isMultiplayer) {
+        submitRoundScore(computed.finalScore, computed.minDistance, nextStreak);
+        setHasSubmittedMP(true);
+        addToast('Previsão enviada! Aguardando outros jogadores...', 'info');
+    } else {
+        setSessionStreak(nextStreak);
+        setCurrentScore(prev => prev + computed.finalScore);
+        
+        // Save Score (Solo)
+        if (user) {
+            await mockStore.addScore({
+                userId: user.uid,
+                displayName: user.displayName,
+                photoURL: user.photoURL,
+                eventId: currentEvent.id,
+                difficulty: difficulty,
+                forecastLat: forecast.lat,
+                forecastLng: forecast.lng,
+                distanceKm: computed.minDistance,
+                streakCount: nextStreak,
+                basePoints: computed.basePoints,
+                difficultyMultiplier: computed.difficultyMultiplier,
+                streakBonus: computed.streakBonus,
+                finalScore: computed.finalScore
+            });
+        }
+        setPhase('result');
     }
-    
-    // AUTO TRANSITION TO RESULT PHASE
-    setPhase('result');
+  };
+
+  const handleForceSubmitFailure = () => {
+      // Called when timer runs out and user hasn't submitted
+      if (isMultiplayer && !hasSubmittedMP) {
+          setHasSubmittedMP(true); // IMMEDIATE UPDATE to prevent glitches
+          
+          // Create dummy result to prevent crash
+          setResult({
+              finalScore: 0,
+              precisionScore: 0,
+              clusterScore: 0,
+              reportsCaught: 0,
+              distanceKm: 99999,
+              streakCount: 0,
+              minDistance: 99999
+          });
+
+          submitRoundScore(0, 99999, 0); // Zero points
+          addToast('Tempo esgotado! Pontuação zerada.', 'error');
+      }
+  };
+
+  const handleHostForceFinish = () => {
+      if (isMultiplayer && lobby?.hostId === user?.uid) {
+          triggerForceFinish();
+      }
   };
 
   // --- UI RENDER ---
@@ -201,8 +338,8 @@ export default function Game() {
       return (
         <div className="min-h-[80vh] flex flex-col items-center justify-center animate-in fade-in">
             <div className="mb-8 text-center">
-                <h1 className="text-4xl md:text-5xl font-black text-white tracking-tight mb-2 uppercase">Multiplayer</h1>
-                <p className="text-slate-400">Configure sua sessão para o Ranking</p>
+                <h1 className="text-4xl md:text-5xl font-black text-white tracking-tight mb-2 uppercase">Modo Solo</h1>
+                <p className="text-slate-400">Configure sua sessão</p>
             </div>
 
             <div className="w-full max-w-sm space-y-6">
@@ -238,17 +375,19 @@ export default function Game() {
         <div className="fixed inset-0 bg-[#0a0f1a] z-50 flex flex-col items-center justify-center animate-in fade-in duration-500">
              <div className="bg-slate-800/50 p-8 rounded-2xl border border-white/5 flex flex-col items-center">
                 <Loader2 className="h-12 w-12 text-cyan-400 animate-spin mb-4" />
-                <h2 className="text-xl font-bold text-white mb-1">Gerando Dia...</h2>
+                <h2 className="text-xl font-bold text-white mb-1">
+                    {isMultiplayer ? 'Sincronizando...' : 'Gerando Dia...'}
+                </h2>
                 <p className="text-slate-500 text-sm">Carregando dados do modelo</p>
              </div>
         </div>
       );
   }
 
-  // --- RESULT VIEW ---
+  // --- RESULT VIEW (SOLO & MULTIPLAYER) ---
   if (phase === 'result' && currentEvent && result) {
       return (
-        <div className="fixed inset-0 top-16 bg-[#0a0f1a] overflow-y-auto animate-in fade-in slide-in-from-bottom-4 duration-500 z-10">
+        <div className="fixed inset-0 top-16 bg-[#0a0f1a] overflow-y-auto animate-in fade-in slide-in-from-bottom-4 duration-500 z-10 pb-24">
             <div className="max-w-7xl mx-auto p-4 md:p-8 h-full">
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full min-h-[600px]">
                     
@@ -267,6 +406,7 @@ export default function Game() {
                                 layerImageUrl={null}
                                 forecastMarker={forecast}
                                 stormReports={currentEvent.stormReports}
+                                riskPolygons={currentEvent.riskPolygons} // Pass polygons to map
                                 allowPlaceMarker={false}
                             />
                         </div>
@@ -284,16 +424,12 @@ export default function Game() {
                                 <span className="text-slate-300">Tornado</span>
                             </div>
                              <div className="flex items-center gap-2">
-                                <div className="flex items-center justify-center w-4 h-4">
-                                   <svg width="10" height="10" viewBox="0 0 24 24" fill="#3b82f6" stroke="white" strokeWidth="3"><circle cx="12" cy="12" r="10"/></svg>
-                                </div>
-                                <span className="text-slate-300">Vento</span>
+                                <div className="w-3 h-3 bg-[#facc15] opacity-80 border border-white/30"></div>
+                                <span className="text-slate-300">Nível 1</span>
                             </div>
                             <div className="flex items-center gap-2">
-                                <div className="flex items-center justify-center w-4 h-4">
-                                   <svg width="12" height="12" viewBox="0 0 24 24" fill="#22c55e" stroke="white" strokeWidth="3"><rect x="5" y="5" width="14" height="14" transform="rotate(45 12 12)"/></svg>
-                                </div>
-                                <span className="text-slate-300">Granizo</span>
+                                <div className="w-3 h-3 bg-[#ef4444] opacity-80 border border-white/30"></div>
+                                <span className="text-slate-300">Nível 3</span>
                             </div>
                         </div>
                     </div>
@@ -312,42 +448,97 @@ export default function Game() {
                             <div className="text-slate-500 text-sm mt-1">pontos ganhos</div>
                         </div>
 
+                        <div className="relative z-10 space-y-2">
+                            <div className="flex justify-between items-center text-sm border-b border-white/5 pb-2">
+                                <span className="text-slate-400">Pontos de Precisão (Dot)</span>
+                                <span className="text-emerald-400 font-mono font-bold">+{result.precisionScore}</span>
+                            </div>
+                            <div className="flex justify-between items-center text-sm border-b border-white/5 pb-2">
+                                <span className="text-slate-400">Pontos de Área (Circle)</span>
+                                <span className="text-cyan-400 font-mono font-bold">+{result.clusterScore}</span>
+                            </div>
+                             <div className="flex justify-between items-center text-sm border-b border-white/5 pb-2">
+                                <span className="text-slate-400">Relatos Capturados</span>
+                                <span className="text-white font-mono font-bold">{result.reportsCaught}</span>
+                            </div>
+                        </div>
+
                         <div className="grid grid-cols-2 gap-4 relative z-10">
                             <div className="bg-slate-800/50 p-4 rounded-xl border border-white/5">
-                                <div className="text-3xl font-bold text-white">{Math.round(result.distanceKm)} <span className="text-sm text-slate-500 font-normal">km</span></div>
-                                <div className="text-xs text-slate-400 uppercase tracking-wider mt-1">Erro de Distância</div>
-                            </div>
-                            <div className="bg-slate-800/50 p-4 rounded-xl border border-white/5">
-                                <div className="text-3xl font-bold text-white">{currentEvent.stormReports.length}</div>
-                                <div className="text-xs text-slate-400 uppercase tracking-wider mt-1">Relatos de Tempestade</div>
+                                <div className="text-3xl font-bold text-white">
+                                    {result.distanceKm >= 99900 ? 'N/A' : Math.round(result.distanceKm)} 
+                                    <span className="text-sm text-slate-500 font-normal"> km</span>
+                                </div>
+                                <div className="text-xs text-slate-400 uppercase tracking-wider mt-1">Erro (Centro)</div>
                             </div>
                              <div className="bg-slate-800/50 p-4 rounded-xl border border-white/5">
                                 <div className="text-3xl font-bold text-amber-400">{result.streakCount}</div>
                                 <div className="text-xs text-slate-400 uppercase tracking-wider mt-1">Sequência (Streak)</div>
                             </div>
-                             <div className="bg-slate-800/50 p-4 rounded-xl border border-white/5">
-                                <div className="text-lg font-bold text-white capitalize">{difficulty}</div>
-                                <div className="text-xs text-slate-400 uppercase tracking-wider mt-1">Dificuldade</div>
-                            </div>
                         </div>
 
                         <div className="mt-auto pt-6 space-y-3 relative z-10">
-                            <button 
-                                onClick={handleStartGame}
-                                className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-emerald-900/40 flex items-center justify-center gap-2 transition-all hover:scale-105"
-                            >
-                                <ArrowRight className="w-5 h-5" /> Próxima Rodada
-                            </button>
-                            <button 
-                                onClick={() => setPhase('setup')}
-                                className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium py-3 rounded-xl border border-white/5 flex items-center justify-center gap-2 transition-colors"
-                            >
-                                <RotateCcw className="w-4 h-4" /> Voltar ao Menu
-                            </button>
+                            {isMultiplayer ? (
+                                <button 
+                                    onClick={() => navigate('/lobby-leaderboard')}
+                                    className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-cyan-900/40 flex items-center justify-center gap-2 transition-all hover:scale-105 animate-pulse"
+                                >
+                                    <ListOrdered className="w-5 h-5" /> Ver Placar da Sala
+                                </button>
+                            ) : (
+                                <>
+                                    <button 
+                                        onClick={handleStartGame}
+                                        className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-emerald-900/40 flex items-center justify-center gap-2 transition-all hover:scale-105"
+                                    >
+                                        <ArrowRight className="w-5 h-5" /> Próxima Rodada
+                                    </button>
+                                    <button 
+                                        onClick={() => setPhase('setup')}
+                                        className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium py-3 rounded-xl border border-white/5 flex items-center justify-center gap-2 transition-colors"
+                                    >
+                                        <RotateCcw className="w-4 h-4" /> Voltar ao Menu
+                                    </button>
+                                </>
+                            )}
                         </div>
                     </div>
                 </div>
+
+                {/* Bottom Reference Image (Zoomable) */}
+                {currentEvent.reportMapUrl && (
+                     <div className="mt-8 flex justify-center">
+                         <div className="relative group cursor-zoom-in" onClick={() => setIsReferenceImageZoomed(true)}>
+                             <div className="absolute top-2 right-2 bg-black/60 p-2 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity">
+                                 <ZoomIn className="w-5 h-5 text-white" />
+                             </div>
+                             <img 
+                                src={currentEvent.reportMapUrl} 
+                                alt="Mapa de Relatos Oficial" 
+                                className="max-h-48 rounded-lg border border-white/20 shadow-lg hover:border-cyan-400 transition-all"
+                             />
+                             <p className="text-center text-xs text-slate-500 mt-2">Mapa de Referência (Clique para expandir)</p>
+                         </div>
+                     </div>
+                )}
             </div>
+
+            {/* FULLSCREEN IMAGE MODAL */}
+            {isReferenceImageZoomed && currentEvent.reportMapUrl && (
+                <div 
+                    className="fixed inset-0 z-[1000] bg-black/90 flex items-center justify-center p-4 cursor-zoom-out animate-in fade-in duration-200"
+                    onClick={() => setIsReferenceImageZoomed(false)}
+                >
+                    <img 
+                        src={currentEvent.reportMapUrl} 
+                        className="max-w-full max-h-full rounded shadow-2xl"
+                        alt="Zoomed Reference"
+                    />
+                     <div className="absolute top-4 right-4 text-white">
+                         <X className="w-8 h-8" />
+                     </div>
+                </div>
+            )}
         </div>
       );
   }
@@ -357,18 +548,38 @@ export default function Game() {
     // Top-16 to sit BELOW the Layout header
     <div className="fixed inset-0 top-16 bg-[#0a0f1a] flex flex-col z-0">
         
+        {/* TIMER OVERLAY (Multiplayer) */}
+        {roundTimer !== null && (
+            <div className="absolute top-24 left-1/2 -translate-x-1/2 z-[100] bg-red-600/90 text-white px-6 py-2 rounded-full font-black text-2xl shadow-xl animate-pulse flex items-center gap-2 border border-red-400">
+                <Clock className="w-6 h-6" /> {roundTimer}s
+            </div>
+        )}
+
+        {/* WAITING OVERLAY (Multiplayer Submitted) */}
+        {isMultiplayer && hasSubmittedMP && roundTimer === null && phase !== 'result' && (
+             <div className="absolute inset-0 z-[60] bg-black/50 backdrop-blur-sm flex items-center justify-center animate-in fade-in">
+                 <div className="bg-slate-900 border border-white/10 p-8 rounded-2xl flex flex-col items-center shadow-2xl">
+                     <Loader2 className="w-10 h-10 text-cyan-400 animate-spin mb-4" />
+                     <h2 className="text-2xl font-bold text-white">Previsão Enviada</h2>
+                     <p className="text-slate-400 mt-1">Aguardando outros jogadores...</p>
+                 </div>
+             </div>
+        )}
+        
         {/* TOP BAR - Game Controls */}
         <header className="h-16 bg-[#0a0f1a] border-b border-white/10 flex items-center justify-between px-4 z-50 shrink-0">
             <div className="flex items-center gap-2">
-                <button 
-                    onClick={() => setPhase('setup')} 
-                    className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium transition-colors border border-white/10"
-                >
-                    <ArrowLeft className="h-4 w-4" />
-                    <span className="hidden sm:inline">Dificuldade</span>
-                </button>
+                {!isMultiplayer && (
+                    <button 
+                        onClick={() => setPhase('setup')} 
+                        className="hidden md:flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium transition-colors border border-white/10"
+                    >
+                        <ArrowLeft className="h-4 w-4" />
+                        <span>Dificuldade</span>
+                    </button>
+                )}
                 
-                <div className={clsx("px-3 py-2 rounded-md text-sm font-bold border border-white/10 hidden sm:block",
+                <div className={clsx("px-3 py-2 rounded-md text-sm font-bold border border-white/10 hidden md:block",
                     difficulty === 'iniciante' ? "bg-emerald-900/50 text-emerald-400 border-emerald-500/30" :
                     difficulty === 'intermediario' ? "bg-cyan-900/50 text-cyan-400 border-cyan-500/30" :
                     difficulty === 'especialista' ? "bg-amber-900/50 text-amber-400 border-amber-500/30" : 
@@ -379,63 +590,78 @@ export default function Game() {
                      difficulty === 'especialista' ? 'Especialista' : 'Mestre'}
                 </div>
 
-                <button 
-                    onClick={handleStartGame} 
-                    className="ml-2 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded-md text-sm font-bold flex items-center gap-2 transition-all shadow-lg shadow-blue-900/20"
-                    title="Carregar novo dia aleatório"
-                >
-                    <Shuffle className="h-4 w-4" /> 
-                    <span className="hidden md:inline">Gerar Dia</span>
-                </button>
+                {!isMultiplayer && (
+                    <button 
+                        onClick={handleStartGame} 
+                        className="ml-2 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded-md text-sm font-bold flex items-center gap-2 transition-all shadow-lg shadow-blue-900/20"
+                        title="Carregar novo dia aleatório"
+                    >
+                        <Shuffle className="h-4 w-4" /> 
+                        <span className="hidden md:inline">Gerar Dia</span>
+                    </button>
+                )}
             </div>
 
             <div className="flex items-center gap-2">
+                {/* HOST FORCE FINISH BUTTON */}
+                {isMultiplayer && lobby?.hostId === user?.uid && !lobby.roundEndTime && (
+                     <button 
+                        onClick={handleHostForceFinish}
+                        className="bg-red-900/50 hover:bg-red-600 text-red-200 hover:text-white border border-red-500/30 px-3 py-2 rounded-md text-sm font-bold flex items-center gap-2 transition-all"
+                        title="Forçar fim da rodada (15s)"
+                     >
+                        <Clock className="w-4 h-4" /> 
+                        <span className="hidden md:inline">Finalizar Rodada</span>
+                     </button>
+                )}
+
                 {/* Place Target Button - Opens Modal */}
                 <button 
                     onClick={openTargetModal}
                     className={clsx(
-                        "px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 transition-colors border",
+                        "px-3 md:px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 transition-colors border",
                         forecast 
                             ? "bg-slate-700 text-slate-400 border-white/10" 
                             : "bg-slate-700 hover:bg-slate-600 text-white border-white/20"
                     )}
                 >
                     <Crosshair className="h-4 w-4" /> 
-                    <span>Posicionar Alvo</span>
+                    <span className="hidden sm:inline">Posicionar Alvo</span>
+                    <span className="sm:hidden">Alvo</span>
                 </button>
 
                 {/* Submit Button - Active only when forecast is set */}
                 <button 
                     onClick={handleSubmit}
-                    disabled={!forecast}
+                    disabled={!forecast || (isMultiplayer && hasSubmittedMP)}
                     className={clsx(
-                        "px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 transition-all border",
-                        !forecast 
+                        "px-3 md:px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 transition-all border",
+                        (!forecast || (isMultiplayer && hasSubmittedMP))
                             ? "bg-slate-800 text-slate-600 border-white/5 cursor-not-allowed"
                             : "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.4)] animate-pulse"
                     )}
                 >
                     <Send className="h-4 w-4" /> 
-                    <span>Enviar</span>
+                    <span className="hidden sm:inline">Enviar</span>
                 </button>
 
                  <button 
                     onClick={() => setShowYear(!showYear)}
-                    className="ml-2 bg-purple-600 hover:bg-purple-500 text-white border border-purple-400 px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 transition-all shadow-lg shadow-purple-900/20"
+                    className="ml-2 bg-purple-600 hover:bg-purple-500 text-white border border-purple-400 px-3 md:px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 transition-all shadow-lg shadow-purple-900/20"
                 >
                     <Lightbulb className="h-4 w-4" /> 
                     <span className="hidden sm:inline">{showYear && currentEvent ? currentEvent.eventDate.split('-')[0] : 'Revelar Ano'}</span>
                 </button>
             </div>
 
-            <div className="flex items-center gap-3 bg-slate-900 px-4 py-2 rounded-md border border-white/10 ml-4">
+            <div className="flex items-center gap-3 bg-slate-900 px-4 py-2 rounded-md border border-white/10 ml-4 hidden md:flex">
                 <Trophy className="h-4 w-4 text-slate-400" />
                 <span className="font-mono font-bold text-white text-lg">{currentScore.toFixed(0)}</span>
             </div>
         </header>
 
-        {/* TIME SLIDER */}
-        <div className="h-12 bg-[#05080f] border-b border-white/5 flex items-center justify-center px-8 relative z-40 shrink-0">
+        {/* DESKTOP TIME SLIDER (Hidden on mobile) */}
+        <div className="hidden md:flex h-12 bg-[#05080f] border-b border-white/5 items-center justify-center px-8 relative z-40 shrink-0">
             <div className="w-full max-w-3xl flex items-center gap-4">
                 <span className="text-xs font-mono text-slate-500">{LAYER_TIMES[0]}</span>
                 <input 
@@ -452,10 +678,41 @@ export default function Game() {
             </div>
         </div>
 
+        {/* MOBILE CONTROL BAR (Hidden on desktop) */}
+        <div className="md:hidden h-14 bg-[#0a0f1a] border-b border-white/10 flex items-center justify-between px-4 z-40 relative">
+             <button 
+                onClick={() => setShowMobileParams(!showMobileParams)}
+                className={clsx(
+                    "flex items-center gap-2 px-3 py-2 rounded border text-xs font-bold transition-all",
+                    showMobileParams 
+                        ? "bg-cyan-900/50 text-cyan-400 border-cyan-500/50" 
+                        : "bg-slate-800 text-slate-300 border-white/10"
+                )}
+             >
+                 <Menu className="w-4 h-4" /> 
+                 Parâmetros
+                 <ChevronDown className={clsx("w-3 h-3 transition-transform", showMobileParams ? "rotate-180" : "")} />
+             </button>
+
+             <div className="flex-1 mx-4 flex flex-col justify-center">
+                 <div className="flex justify-between text-[10px] text-slate-500 font-mono mb-1 px-1">
+                     <span>{LAYER_TIMES[0]}</span>
+                     <span className="text-cyan-400 font-bold">{LAYER_TIMES[timeIndex]}</span>
+                     <span>{LAYER_TIMES[LAYER_TIMES.length-1]}</span>
+                 </div>
+                 <input 
+                    type="range" min="0" max={LAYER_TIMES.length - 1} step="1" value={timeIndex}
+                    onChange={(e) => setTimeIndex(parseInt(e.target.value))}
+                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+                />
+             </div>
+        </div>
+
         {/* MAIN CONTENT AREA */}
-        <div className="flex-1 flex overflow-hidden">
-            {/* SIDEBAR */}
-            <aside className="w-64 bg-[#0a0f1a] border-r border-white/5 flex flex-col z-10 shrink-0">
+        <div className="flex-1 flex overflow-hidden relative">
+            
+            {/* DESKTOP SIDEBAR */}
+            <aside className="hidden md:flex w-64 bg-[#0a0f1a] border-r border-white/5 flex-col z-10 shrink-0">
                 <div className="p-4 border-b border-white/5">
                     <h3 className="text-sm font-bold text-white flex items-center gap-2">
                         <Settings className="h-4 w-4 text-cyan-500" /> Parâmetros
@@ -472,7 +729,7 @@ export default function Game() {
                                     return (
                                         <button
                                             key={layerDef.id}
-                                            onClick={() => !locked && setSelectedParamId(layerDef.id)}
+                                            onClick={() => !locked && handleParameterSelect(layerDef.id)}
                                             disabled={locked}
                                             className={clsx(
                                                 "w-full text-left px-3 py-2 rounded text-xs font-medium flex items-center justify-between transition-colors",
@@ -491,10 +748,42 @@ export default function Game() {
                 </div>
             </aside>
 
+            {/* MOBILE DROPDOWN PARAMETER MENU (OVERLAY) */}
+            {showMobileParams && (
+                <div className="absolute top-0 left-0 w-full bg-[#0a0f1a]/95 backdrop-blur-md z-50 border-b border-white/10 shadow-2xl animate-in slide-in-from-top-2 md:hidden max-h-[60vh] overflow-y-auto custom-scrollbar p-2">
+                    {LAYER_CATEGORIES.map((cat) => (
+                        <div key={cat} className="mb-4">
+                            <h4 className="text-[10px] uppercase tracking-wider text-slate-500 font-bold px-3 mb-2">{cat}</h4>
+                            <div className="grid grid-cols-1 gap-1">
+                                {PREDEFINED_LAYERS.filter(l => l.category === cat).map((layerDef) => {
+                                    const { available, locked } = getParamAvailability(layerDef.id);
+                                    const isSelected = selectedParamId === layerDef.id;
+                                    return (
+                                        <button
+                                            key={layerDef.id}
+                                            onClick={() => !locked && handleParameterSelect(layerDef.id)}
+                                            disabled={locked}
+                                            className={clsx(
+                                                "w-full text-left px-4 py-3 rounded-lg text-sm font-medium flex items-center justify-between transition-colors border border-transparent",
+                                                isSelected ? "bg-cyan-900/30 text-cyan-400 border-cyan-500/30" : "text-slate-300 bg-slate-800/50 hover:bg-slate-800",
+                                                locked && "opacity-50 cursor-not-allowed"
+                                            )}
+                                        >
+                                            <span className="truncate">{layerDef.name}</span>
+                                            {locked ? <Lock className="h-3 w-3 text-slate-600" /> : available ? (isSelected && <div className="h-2 w-2 rounded-full bg-cyan-400" />) : <span className="text-[10px] text-slate-600">N/A</span>}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+
             {/* MAIN DISPLAY AREA */}
-            <main className="flex-1 relative bg-black flex items-center justify-center overflow-hidden p-4">
+            <main className="flex-1 relative bg-black flex items-center justify-center overflow-hidden p-0 md:p-4">
                 {/* Info Overlay */}
-                <div className="absolute top-4 right-4 z-[40] flex flex-col items-end pointer-events-none">
+                <div className="absolute top-4 right-4 z-[30] flex flex-col items-end pointer-events-none">
                      <div className="bg-black/80 backdrop-blur border border-white/10 px-4 py-2 rounded-lg mb-2">
                         <div className="text-xs text-slate-400 uppercase tracking-wider">Visualizando</div>
                         <div className="text-white font-bold text-sm">
@@ -502,17 +791,23 @@ export default function Game() {
                             <span className="ml-2 text-cyan-400">{LAYER_TIMES[timeIndex]}</span>
                         </div>
                      </div>
+                     {isMultiplayer && (
+                         <div className="bg-cyan-900/80 backdrop-blur border border-cyan-500/30 px-4 py-2 rounded-lg flex items-center gap-2 animate-pulse">
+                             <Users className="w-4 h-4 text-cyan-200" />
+                             <span className="text-cyan-100 font-bold text-xs uppercase tracking-widest">Multiplayer</span>
+                         </div>
+                     )}
                 </div>
 
                 {/* PLAYING MODE: Show Static Image (Stretched/Contained 4:3) */}
                 <div className="relative w-full h-full flex items-center justify-center">
                     {/* Changed container aspect ratio to 4:3 */}
-                    <div className="relative w-auto h-full aspect-[4/3] bg-[#05080f] border border-white/10 shadow-2xl overflow-hidden">
+                    <div className="relative w-full h-full md:w-auto md:h-full md:aspect-[4/3] bg-[#05080f] md:border border-white/10 shadow-2xl overflow-hidden">
                         {activeLayer ? (
                             <img 
                                 src={activeLayer.imageUrl} 
                                 alt="Weather Model" 
-                                className="w-full h-full object-fill" 
+                                className="w-full h-full object-contain md:object-fill" 
                             />
                         ) : (
                             <div className="w-full h-full flex flex-col items-center justify-center text-center text-slate-500 p-8">

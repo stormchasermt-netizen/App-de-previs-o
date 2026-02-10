@@ -11,8 +11,8 @@ export default function Ranking() {
   const { addToast } = useToast();
   const [scores, setScores] = useState<PrevisaoScore[]>([]);
 
-  const loadScores = () => {
-    const all = mockStore.getScores();
+  const loadScores = async () => {
+    const all = await mockStore.getScores();
     all.sort((a, b) => b.finalScore - a.finalScore);
     setScores(all);
   };
@@ -21,9 +21,9 @@ export default function Ranking() {
     loadScores();
   }, []);
 
-  const handleClear = () => {
+  const handleClear = async () => {
     if (confirm('Tem certeza que deseja apagar todo o ranking?')) {
-        mockStore.clearScores();
+        await mockStore.clearScores();
         loadScores();
         addToast('Ranking zerado com sucesso.', 'success');
     }

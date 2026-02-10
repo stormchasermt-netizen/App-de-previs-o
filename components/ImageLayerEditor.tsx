@@ -11,21 +11,39 @@ async function canvasPreview(image: HTMLImageElement, crop: PixelCrop) {
   
   const scaleX = image.naturalWidth / image.width;
   const scaleY = image.naturalHeight / image.height;
-  const pixelRatio = window.devicePixelRatio || 1;
+  // Use 1 for pixel ratio to save space, unless on very high DPI screens where we might cap it
+  const pixelRatio = 1; 
   
-  canvas.width = Math.floor(crop.width * scaleX * pixelRatio);
-  canvas.height = Math.floor(crop.height * scaleY * pixelRatio);
+  let targetWidth = Math.floor(crop.width * scaleX * pixelRatio);
+  let targetHeight = Math.floor(crop.height * scaleY * pixelRatio);
+
+  // Resize constraints to prevent huge base64 strings
+  const MAX_DIMENSION = 1024;
+  if (targetWidth > MAX_DIMENSION || targetHeight > MAX_DIMENSION) {
+      const ratio = targetWidth / targetHeight;
+      if (targetWidth > targetHeight) {
+          targetWidth = MAX_DIMENSION;
+          targetHeight = Math.floor(MAX_DIMENSION / ratio);
+      } else {
+          targetHeight = MAX_DIMENSION;
+          targetWidth = Math.floor(MAX_DIMENSION * ratio);
+      }
+  }
   
-  ctx.scale(pixelRatio, pixelRatio);
-  ctx.imageSmoothingQuality = 'high';
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  
+  ctx.imageSmoothingQuality = 'medium'; // Balance quality/perf
   
   const cropX = crop.x * scaleX;
   const cropY = crop.y * scaleY;
+  const cropW = crop.width * scaleX;
+  const cropH = crop.height * scaleY;
   
   ctx.drawImage(
     image,
-    cropX, cropY, crop.width * scaleX, crop.height * scaleY,
-    0, 0, crop.width * scaleX, crop.height * scaleY
+    cropX, cropY, cropW, cropH,
+    0, 0, targetWidth, targetHeight
   );
   
   return new Promise<string>((resolve) => {
@@ -36,7 +54,7 @@ async function canvasPreview(image: HTMLImageElement, crop: PixelCrop) {
       reader.onloadend = () => {
         resolve(reader.result as string);
       };
-    }, 'image/jpeg', 0.9);
+    }, 'image/jpeg', 0.65); // Reduced quality to save space (65%)
   });
 }
 
@@ -159,7 +177,7 @@ export function ImageLayerEditor({ onSave }: ImageLayerEditorProps) {
                 </div>
                 
                 <p className="text-xs text-slate-500 mt-2">
-                    A área selecionada será adaptada para a tela 4:3 do jogador.
+                    A área selecionada será otimizada para web (max 1024px).
                 </p>
             </div>
 

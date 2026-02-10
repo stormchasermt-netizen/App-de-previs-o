@@ -1,14 +1,16 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { CloudLightning, Settings, BarChart2, User, X, LogOut, Save, Volume2, Music, Shield } from 'lucide-react';
 import clsx from 'clsx';
 import { mockStore } from '@/lib/store';
+import { PrevisaoScore } from '@/lib/types';
 
 export default function Layout({ children }: { children?: React.ReactNode }) {
   const { user, loginWithGoogle, updateUsername, logout } = useAuth();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isAccountOpen, setIsAccountOpen] = useState(false);
+  const [userScores, setUserScores] = useState<PrevisaoScore[]>([]);
   
   // Settings State (Mock)
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -17,6 +19,20 @@ export default function Layout({ children }: { children?: React.ReactNode }) {
   // Account State
   const [newUsername, setNewUsername] = useState('');
   
+  useEffect(() => {
+    let isMounted = true;
+    if (user) {
+        mockStore.getScores().then(scores => {
+            if (isMounted) {
+                setUserScores(scores.filter(s => s.userId === user.uid));
+            }
+        });
+    } else {
+        setUserScores([]);
+    }
+    return () => { isMounted = false; };
+  }, [user, isAccountOpen]);
+
   const handleOpenAccount = () => {
       setIsSettingsOpen(false);
       setNewUsername(user?.displayName || '');
@@ -34,7 +50,7 @@ export default function Layout({ children }: { children?: React.ReactNode }) {
       loginWithGoogle();
   };
 
-  const stats = user ? mockStore.getScores().filter(s => s.userId === user.uid) : [];
+  const stats = userScores;
   const totalScore = stats.reduce((acc, curr) => acc + curr.finalScore, 0);
   const bestDistance = stats.length > 0 ? Math.min(...stats.map(s => s.distanceKm)) : 0;
   const bestDistanceMi = (bestDistance * 0.621371).toFixed(0);
@@ -42,26 +58,28 @@ export default function Layout({ children }: { children?: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-[#0a0f1a] text-white font-sans selection:bg-cyan-500/30 relative overflow-x-hidden">
       
-      {/* DYNAMIC BACKGROUND */}
+      {/* BACKGROUND IMAGE WITH BLUR */}
       <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden">
-          {/* Base Gradient */}
-          <div className="absolute inset-0 bg-gradient-to-b from-[#0f172a] via-[#020617] to-black"></div>
+          {/* Image Layer - Supercell Storm */}
+          <div 
+            className="absolute inset-0 bg-cover bg-center bg-no-repeat blur-[6px] scale-105 opacity-80"
+            style={{ 
+                // Usando uma imagem de alta qualidade similar à solicitada (Supercélula sobre campo)
+                backgroundImage: "url('https://images.unsplash.com/photo-1454789548728-85d2696ddbcd?q=80&w=2670&auto=format&fit=crop')" 
+            }}
+          ></div>
+
+          {/* Dark Overlay for Text Readability */}
+          <div className="absolute inset-0 bg-[#0a0f1a]/85 backdrop-blur-[2px]"></div>
           
-          {/* Animated Clouds (CSS driven) */}
-          <div className="absolute inset-0 opacity-20 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] mix-blend-overlay"></div>
-          
-          {/* Lightning Flash Layer */}
+          {/* Lightning Flash Layer (Kept for effect) */}
           <div className="absolute inset-0 z-0 bg-white opacity-0 animate-lightning pointer-events-none mix-blend-overlay"></div>
-          
-          {/* Ambient Glows */}
-          <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-cyan-900/20 blur-[120px] rounded-full animate-pulse-slow"></div>
-          <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-blue-900/10 blur-[120px] rounded-full"></div>
       </div>
 
       {/* HEADER */}
-      <header className="sticky top-0 z-40 bg-[#0a0f1a]/80 backdrop-blur-md px-6 h-16 flex items-center justify-between border-b border-white/5 shadow-lg shadow-black/20">
+      <header className="sticky top-0 z-40 bg-[#0a0f1a]/70 backdrop-blur-md px-6 h-16 flex items-center justify-between border-b border-white/5 shadow-lg shadow-black/20">
          <div className="flex items-center gap-4">
-             <Link to="/" className="text-xs font-bold tracking-widest text-slate-400 hover:text-white uppercase flex items-center gap-2 transition-colors">
+             <Link to="/" className="text-xs font-bold tracking-widest text-slate-300 hover:text-white uppercase flex items-center gap-2 transition-colors">
                 <CloudLightning className="h-5 w-5 text-cyan-400" /> 
                 <span className="hidden sm:inline">Previsão Master</span>
              </Link>
@@ -112,7 +130,7 @@ export default function Layout({ children }: { children?: React.ReactNode }) {
         {children}
       </main>
 
-      <footer className="fixed bottom-0 w-full py-4 text-center text-[10px] text-slate-600 border-t border-white/5 bg-[#0a0f1a]/90 backdrop-blur z-30">
+      <footer className="fixed bottom-0 w-full py-4 text-center text-[10px] text-slate-500 border-t border-white/5 bg-[#0a0f1a]/90 backdrop-blur z-30">
           <div className="flex items-center justify-center gap-2">
             <CloudLightning className="h-3 w-3" /> © 2025 Previsão Master
           </div>
