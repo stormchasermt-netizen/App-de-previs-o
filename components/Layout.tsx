@@ -60,12 +60,11 @@ export default function Layout({ children }: { children?: React.ReactNode }) {
       
       {/* BACKGROUND IMAGE WITH BLUR */}
       <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden">
-          {/* Image Layer - Supercell Storm */}
+          {/* Image Layer - Custom User Image */}
           <div 
             className="absolute inset-0 bg-cover bg-center bg-no-repeat blur-[6px] scale-105 opacity-80"
             style={{ 
-                // Usando uma imagem de alta qualidade similar à solicitada (Supercélula sobre campo)
-                backgroundImage: "url('https://images.unsplash.com/photo-1454789548728-85d2696ddbcd?q=80&w=2670&auto=format&fit=crop')" 
+                backgroundImage: "url('https://raw.githubusercontent.com/stormchasermt-netizen/App-de-previs-o/650647f85f02f514b2864389435d07746a07038a/WhatsApp%20Image%202026-02-10%20at%2009.48.58.jpeg')" 
             }}
           ></div>
 

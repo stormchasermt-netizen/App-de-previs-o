@@ -1,9 +1,9 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useMultiplayer } from '@/contexts/MultiplayerContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { mockStore } from '@/lib/store';
-import { Users, Copy, Play, Loader2, LogOut, Shield, AlertTriangle } from 'lucide-react';
+import { Users, Copy, Play, Loader2, LogOut, Shield, AlertTriangle, RefreshCw } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '@/contexts/ToastContext';
 
@@ -14,12 +14,33 @@ export default function Lobby() {
     const { addToast } = useToast();
     const navigate = useNavigate();
 
+    const [isJoining, setIsJoining] = useState(false);
+    const [joinError, setJoinError] = useState(false);
+
     // Auto-join if url param exists and not in lobby
     useEffect(() => {
-        if (code && user && (!lobby || lobby.code !== code)) {
-            joinLobby(code);
-        }
-    }, [code, user, lobby]);
+        const initJoin = async () => {
+            // Only try to join if we have user, have code, and are NOT already in this lobby
+            // AND if we haven't already failed (joinError) - preventing infinite loops
+            if (code && user && (!lobby || lobby.code !== code)) {
+                if (isJoining || joinError) return; // Stop if already active or failed
+                
+                setIsJoining(true);
+                setJoinError(false);
+                
+                console.log("Attempting to join lobby:", code);
+                const success = await joinLobby(code);
+                
+                setIsJoining(false);
+                if (!success) {
+                    setJoinError(true);
+                }
+            }
+        };
+
+        initJoin();
+        // Removed `joinError` from deps so it doesn't re-run immediately on error
+    }, [code, user, lobby, isJoining]); 
 
     // Redirect if playing
     useEffect(() => {
@@ -37,10 +58,55 @@ export default function Lobby() {
         );
     }
 
+    // ERROR STATE
+    if (joinError && !lobby) {
+        return (
+            <div className="min-h-[60vh] flex flex-col items-center justify-center gap-6 animate-in fade-in">
+                <div className="bg-red-500/10 border border-red-500/50 p-6 rounded-2xl text-center max-w-sm">
+                    <AlertTriangle className="w-12 h-12 text-red-400 mx-auto mb-4" />
+                    <h2 className="text-xl font-bold text-white mb-2">Falha na Conexão</h2>
+                    <p className="text-slate-400 text-sm mb-6">
+                        Não foi possível conectar à sala {code}. O Host pode ter saído ou a conexão expirou.
+                    </p>
+                    <div className="flex flex-col gap-3">
+                        <button 
+                            onClick={() => { 
+                                setJoinError(false); 
+                                setIsJoining(false); 
+                                // Small timeout to allow state reset before useEffect might kick in (or call directly)
+                                setTimeout(() => {
+                                    setIsJoining(true);
+                                    joinLobby(code || '').then(res => {
+                                        setIsJoining(false);
+                                        if(!res) setJoinError(true);
+                                    });
+                                }, 100);
+                            }}
+                            disabled={isJoining}
+                            className="bg-red-600 hover:bg-red-500 text-white px-6 py-3 rounded-xl font-bold flex items-center justify-center gap-2 disabled:opacity-50"
+                        >
+                            {isJoining ? <Loader2 className="w-4 h-4 animate-spin"/> : <RefreshCw className="w-4 h-4" />} 
+                            {isJoining ? 'Conectando...' : 'Tentar Novamente'}
+                        </button>
+                        <button 
+                            onClick={() => navigate('/')}
+                            className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-6 py-3 rounded-xl font-bold"
+                        >
+                            Voltar ao Menu
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
     if (!lobby) {
         return (
-            <div className="min-h-[60vh] flex items-center justify-center">
-                <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
+            <div className="min-h-[60vh] flex flex-col items-center justify-center gap-4">
+                <Loader2 className="w-12 h-12 text-cyan-400 animate-spin" />
+                <p className="text-slate-400 animate-pulse">
+                    {isJoining ? 'Conectando à sala...' : 'Sincronizando...'}
+                </p>
             </div>
         );
     }

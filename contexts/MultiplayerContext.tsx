@@ -9,28 +9,49 @@ import { mockStore } from '@/lib/store';
 // Define Message Protocol
 type MPMessage = 
   | { type: 'SYNC_LOBBY'; lobby: Lobby }
-  | { type: 'SYNC_EVENT_DATA'; event: PrevisaoEvent } // New message to send heavy image data
+  | { type: 'SYNC_EVENT_DATA'; event: PrevisaoEvent } // Legacy/Small payloads
+  | { type: 'EVENT_CHUNK'; chunkId: string; index: number; total: number; data: string } // NEW: For heavy images
   | { type: 'JOIN_REQUEST'; user: { uid: string; displayName: string; photoURL?: string } }
+  | { type: 'REQUEST_EVENT_DATA'; uid: string }
   | { type: 'LEAVE'; uid: string }
   | { type: 'SUBMIT_SCORE'; uid: string; score: number; distance: number; streak: number }
   | { type: 'HOST_ACTION'; action: string; payload?: any }
-  | { type: 'ERROR'; message: string }; // Generic error message
+  | { type: 'ERROR'; message: string };
 
 interface MultiplayerContextType {
   lobby: Lobby | null;
-  currentEventData: PrevisaoEvent | null; // Shared event data
+  currentEventData: PrevisaoEvent | null;
+  downloadProgress: number; // 0 to 100
   isHost: boolean;
   createLobby: (difficulty: PrevisaoDifficulty) => void;
   joinLobby: (code: string) => Promise<boolean>;
   leaveLobby: () => void;
   startGame: (eventId: string) => void;
+  requestEventData: () => void;
   submitRoundScore: (score: number, distance: number, streak: number) => void;
   triggerForceFinish: () => void;
+  forceEndRound: () => void;
   nextRound: (eventId: string) => void;
   endMatch: () => void;
 }
 
 const MultiplayerContext = createContext<MultiplayerContextType | undefined>(undefined);
+
+// ROBUST PEER CONFIGURATION
+const PEER_CONFIG: any = {
+    debug: 1,
+    config: {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+        ]
+    }
+};
+
+const CHUNK_SIZE = 16384; // 16KB safe chunk size for WebRTC
 
 export function MultiplayerProvider({ children }: { children?: React.ReactNode }) {
   const { user } = useAuth();
@@ -39,24 +60,41 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
 
   const [lobby, setLobby] = useState<Lobby | null>(null);
   const [currentEventData, setCurrentEventData] = useState<PrevisaoEvent | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
   const [peer, setPeer] = useState<Peer | null>(null);
   
-  // Refs to maintain state in callbacks/effects without stale closures
   const lobbyRef = useRef<Lobby | null>(null);
-  const connectionsRef = useRef<DataConnection[]>([]); // For Host: list of client connections
-  const hostConnRef = useRef<DataConnection | null>(null); // For Client: connection to host
+  const eventDataRef = useRef<PrevisaoEvent | null>(null);
+  const connectionsRef = useRef<DataConnection[]>([]);
+  const hostConnRef = useRef<DataConnection | null>(null);
+  
+  // Chunk Reassembly Buffer
+  const chunksBuffer = useRef<Map<string, string[]>>(new Map());
 
-  // Update ref when state changes
   useEffect(() => {
     lobbyRef.current = lobby;
   }, [lobby]);
+  
+  useEffect(() => {
+      eventDataRef.current = currentEventData;
+  }, [currentEventData]);
 
-  // Clean up on unmount
   useEffect(() => {
     return () => {
       peer?.destroy();
     };
   }, []);
+
+  // --- HOST HEARTBEAT SYNC ---
+  useEffect(() => {
+      if (!lobby || lobby.hostId !== user?.uid || lobby.status !== 'waiting') return;
+      const interval = setInterval(() => {
+          if (connectionsRef.current.length > 0) {
+              broadcastLobby(lobby);
+          }
+      }, 2000); 
+      return () => clearInterval(interval);
+  }, [lobby, user]);
 
   // --- HOST LOGIC ---
 
@@ -65,9 +103,7 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
     if (peer) peer.destroy();
 
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
-    
-    // Initialize Host Peer
-    const newPeer = new Peer(code, { debug: 1 });
+    const newPeer = new Peer(code, PEER_CONFIG);
 
     newPeer.on('open', (id) => {
       console.log('Lobby Created with ID:', id);
@@ -99,9 +135,10 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
       navigate(`/lobby/${id}`);
     });
 
-    newPeer.on('error', (err) => {
+    newPeer.on('error', (err: any) => {
+      console.error("Host Peer Error:", err);
       if (err.type === 'unavailable-id') {
-         createLobby(difficulty);
+         createLobby(difficulty); 
       } else {
          addToast('Erro ao criar sala P2P: ' + err.type, 'error');
       }
@@ -109,7 +146,11 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
 
     newPeer.on('connection', (conn) => {
       conn.on('open', () => {
+         connectionsRef.current = connectionsRef.current.filter(c => c.open);
          connectionsRef.current.push(conn);
+         if (lobbyRef.current) {
+             conn.send({ type: 'SYNC_LOBBY', lobby: lobbyRef.current });
+         }
       });
 
       conn.on('data', (data: any) => {
@@ -119,18 +160,23 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
       conn.on('close', () => {
         connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
       });
+      
+      conn.on('error', (err) => {
+          console.error("Connection error on host:", err);
+          connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
+      });
     });
   };
 
   const handleHostMessage = (msg: MPMessage, conn: DataConnection) => {
       const currentLobby = lobbyRef.current;
+      const currentEvent = eventDataRef.current;
       if (!currentLobby) return;
 
       if (msg.type === 'JOIN_REQUEST') {
-          // Check Max Players
           if (currentLobby.players.length >= 20) {
               conn.send({ type: 'ERROR', message: 'A sala está cheia (máx 20 jogadores).' });
-              setTimeout(() => conn.close(), 500); // Give time to send message
+              setTimeout(() => conn.close(), 500);
               return;
           }
 
@@ -151,19 +197,27 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
                   streakCount: 0
               });
               setLobby(updatedLobby);
+              
               broadcastLobby(updatedLobby);
               
-              // If joining late during a game, send the current event data too
-              if (updatedLobby.status === 'playing' && currentEventData) {
-                  conn.send({ type: 'SYNC_EVENT_DATA', event: currentEventData });
+              // If joining late, send data (Chunked)
+              if (updatedLobby.status === 'playing' && currentEvent) {
+                  sendEventDataToClient(conn, currentEvent);
               }
               
               addToast(`${msg.user.displayName} entrou!`, 'info');
           } else {
               conn.send({ type: 'SYNC_LOBBY', lobby: updatedLobby });
-               if (updatedLobby.status === 'playing' && currentEventData) {
-                  conn.send({ type: 'SYNC_EVENT_DATA', event: currentEventData });
+              if (updatedLobby.status === 'playing' && currentEvent) {
+                  sendEventDataToClient(conn, currentEvent);
               }
+              broadcastLobby(updatedLobby);
+          }
+      }
+
+      if (msg.type === 'REQUEST_EVENT_DATA') {
+          if (currentEvent) {
+              sendEventDataToClient(conn, currentEvent);
           }
       }
 
@@ -180,7 +234,6 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
               setLobby(updatedLobby);
               broadcastLobby(updatedLobby);
 
-              // CHECK AUTO END ROUND
               const allSubmitted = updatedLobby.players.every(p => p.hasSubmitted);
               if (allSubmitted) {
                   setTimeout(() => {
@@ -198,32 +251,148 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
       }
   };
 
-  const broadcastLobby = (data: Lobby) => {
-      connectionsRef.current.forEach(conn => {
-          if (conn.open) {
-              conn.send({ type: 'SYNC_LOBBY', lobby: data });
+  // --- CHUNKING LOGIC ---
+
+  const sendEventDataToClient = (conn: DataConnection, event: PrevisaoEvent) => {
+      try {
+          const json = JSON.stringify(event);
+          const chunkId = Date.now().toString();
+          const totalChunks = Math.ceil(json.length / CHUNK_SIZE);
+          
+          console.log(`Sending event data: ${json.length} bytes in ${totalChunks} chunks.`);
+
+          for (let i = 0; i < totalChunks; i++) {
+              const chunk = json.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+              conn.send({
+                  type: 'EVENT_CHUNK',
+                  chunkId,
+                  index: i,
+                  total: totalChunks,
+                  data: chunk
+              });
           }
-      });
+      } catch (e) {
+          console.error("Error chunking data:", e);
+      }
   };
-  
-  const broadcastEventData = (event: PrevisaoEvent) => {
-      connectionsRef.current.forEach(conn => {
-          if (conn.open) {
-              conn.send({ type: 'SYNC_EVENT_DATA', event: event });
+
+  const broadcastEventDataChunks = (event: PrevisaoEvent) => {
+      try {
+          const json = JSON.stringify(event);
+          const chunkId = Date.now().toString();
+          const totalChunks = Math.ceil(json.length / CHUNK_SIZE);
+          
+          console.log(`Broadcasting event data: ${json.length} bytes in ${totalChunks} chunks.`);
+
+          // Helper to send with delay to avoid flooding WebRTC buffer
+          const sendChunkBatch = async () => {
+              for (let i = 0; i < totalChunks; i++) {
+                  const chunk = json.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+                  const msg = {
+                      type: 'EVENT_CHUNK',
+                      chunkId,
+                      index: i,
+                      total: totalChunks,
+                      data: chunk
+                  };
+                  
+                  connectionsRef.current.forEach(conn => {
+                      if (conn.open) {
+                          try { conn.send(msg); } catch(e) {}
+                      }
+                  });
+
+                  // Small delay every 10 chunks to let network breathe
+                  if (i % 10 === 0) await new Promise(r => setTimeout(r, 50));
+              }
+          };
+          
+          sendChunkBatch();
+
+      } catch (e) {
+          console.error("Failed to broadcast chunks:", e);
+      }
+  };
+
+  const handleIncomingChunk = (msg: any) => {
+      const { chunkId, index, total, data } = msg;
+      
+      if (!chunksBuffer.current.has(chunkId)) {
+          chunksBuffer.current.set(chunkId, new Array(total).fill(null));
+      }
+      
+      const buffer = chunksBuffer.current.get(chunkId)!;
+      buffer[index] = data;
+      
+      // Calculate progress
+      const percent = Math.round(((index + 1) / total) * 100);
+      setDownloadProgress(percent);
+
+      // Check if complete
+      if (buffer.every(c => c !== null)) {
+          console.log("All chunks received. Reassembling...");
+          const fullJson = buffer.join('');
+          try {
+              const event = JSON.parse(fullJson);
+              setCurrentEventData(event);
+              setDownloadProgress(100);
+              chunksBuffer.current.delete(chunkId); // Cleanup
+              addToast("Mapa carregado com sucesso!", "success");
+          } catch (e) {
+              console.error("Failed to parse chunked JSON", e);
+              addToast("Erro ao processar dados do mapa.", "error");
           }
-      });
+      }
   };
 
   // --- CLIENT LOGIC ---
 
+  const broadcastLobby = (data: Lobby) => {
+      connectionsRef.current.forEach(conn => {
+          if (conn.open) {
+              try {
+                  conn.send({ type: 'SYNC_LOBBY', lobby: data });
+              } catch (e) {
+                  console.error("Failed to broadcast to a peer:", e);
+              }
+          }
+      });
+  };
+
   const joinLobby = async (code: string): Promise<boolean> => {
       if (!user) return false;
-      if (peer) peer.destroy();
+      
+      if (peer) {
+          peer.destroy();
+          setPeer(null);
+          await new Promise(r => setTimeout(r, 500)); 
+      }
 
       return new Promise((resolve) => {
-          const clientPeer = new Peer({ debug: 1 });
+          let isResolved = false;
+
+          const fail = (msg?: string) => {
+              if (isResolved) return;
+              isResolved = true;
+              if (msg) addToast(msg, 'error');
+              resolve(false);
+          };
+
+          const succeed = (lobbyData: Lobby) => {
+              if (isResolved) return;
+              isResolved = true;
+              setLobby(lobbyData);
+              resolve(true);
+          };
+
+          const connectionTimeout = setTimeout(() => {
+              fail("Tempo de conexão esgotado.");
+          }, 15000);
+
+          const uniqueClientId = `player_${user.uid}_${Date.now().toString(36)}`;
+          const clientPeer = new Peer(uniqueClientId, PEER_CONFIG);
           
-          clientPeer.on('open', () => {
+          clientPeer.on('open', (myId) => {
               const conn = clientPeer.connect(code, { reliable: true });
 
               conn.on('open', () => {
@@ -233,43 +402,54 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
                       type: 'JOIN_REQUEST', 
                       user: { uid: user.uid, displayName: user.displayName, photoURL: user.photoURL } 
                   });
-                  resolve(true);
               });
 
               conn.on('data', (data: any) => {
-                  if (data && data.type === 'SYNC_LOBBY') {
-                      setLobby(data.lobby);
+                  if (data.type === 'SYNC_LOBBY') {
+                      clearTimeout(connectionTimeout);
+                      succeed(data.lobby);
                   }
-                  if (data && data.type === 'SYNC_EVENT_DATA') {
-                      console.log("Recebendo dados do evento do Host...");
+                  if (data.type === 'SYNC_EVENT_DATA') { // Legacy fallback
                       setCurrentEventData(data.event);
                   }
-                  if (data && data.type === 'ERROR') {
-                      addToast(data.message, 'error');
-                      // Disconnect logic handled by Host closing, but we can cleanup here
-                      setLobby(null);
-                      navigate('/');
+                  if (data.type === 'EVENT_CHUNK') {
+                      handleIncomingChunk(data);
                   }
-              });
-              
-              conn.on('error', (err) => {
-                  addToast('Erro na conexão com o Host.', 'error');
-                  resolve(false);
+                  if (data.type === 'ERROR') {
+                      clearTimeout(connectionTimeout);
+                      fail(data.message);
+                  }
               });
               
               conn.on('close', () => {
-                  addToast('Desconectado do Host.', 'error');
-                  setLobby(null);
-                  setCurrentEventData(null);
-                  navigate('/');
+                  if(isResolved) {
+                      setLobby(null);
+                      setCurrentEventData(null);
+                      addToast('Desconectado do Host.', 'error');
+                      navigate('/');
+                  } else {
+                      fail("Conexão encerrada pelo Host.");
+                  }
+              });
+
+              conn.on('error', (err) => {
+                  if (!isResolved) fail("Erro de transporte.");
               });
           });
 
-          clientPeer.on('error', (err) => {
-              addToast('Não foi possível conectar à sala. Verifique o código.', 'error');
-              resolve(false);
+          clientPeer.on('error', (err: any) => {
+              clearTimeout(connectionTimeout);
+              fail(`Erro P2P: ${err.type}`);
           });
       });
+  };
+
+  const requestEventData = () => {
+      if (hostConnRef.current && user) {
+          console.log("Requesting missing event data...");
+          setDownloadProgress(1); // Visual feedback
+          hostConnRef.current.send({ type: 'REQUEST_EVENT_DATA', uid: user.uid });
+      }
   };
 
   // --- SHARED ACTIONS ---
@@ -299,49 +479,75 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
   const updateHostState = (updater: (l: Lobby) => void) => {
       if (!lobbyRef.current) return;
       const copy = { ...lobbyRef.current }; 
-      copy.players = [...copy.players.map(p => ({...p}))]; // Deep copy players
+      copy.players = [...copy.players.map(p => ({...p}))];
       updater(copy);
       setLobby(copy);
       broadcastLobby(copy);
   };
 
-  // Actions
   const startGame = async (eventId: string) => {
       if (lobbyRef.current?.hostId !== user?.uid) return;
       
-      // Get Full Event Data from Host's IndexedDB Store (Async now)
       const allEvents = await mockStore.getEvents();
       const fullEvent = allEvents.find(e => e.id === eventId);
       
       if (fullEvent) {
-          // 1. Broadcast heavy data first
+          // 1. Set Local Host State IMMEDIATELY
           setCurrentEventData(fullEvent);
-          broadcastEventData(fullEvent);
           
-          // 2. Then update lobby status
-          updateHostState(l => {
-              l.status = 'playing';
-              l.currentEventId = eventId;
-              l.players.forEach(p => {
-                  p.hasSubmitted = false;
-                  p.lastRoundScore = 0;
-                  p.lastRoundDistance = 0;
+          // 2. Broadcast Heavy Data via Chunks
+          broadcastEventDataChunks(fullEvent);
+          
+          // 3. WAIT for data propagation (4 seconds delay for chunking)
+          addToast("Enviando dados do mapa (4s)...", "info");
+          
+          setTimeout(() => {
+              updateHostState(l => {
+                  l.status = 'playing';
+                  l.currentEventId = eventId;
+                  l.players.forEach(p => {
+                      p.hasSubmitted = false;
+                      p.lastRoundScore = 0;
+                      p.lastRoundDistance = 0;
+                  });
+                  l.roundEndTime = null;
               });
-              l.roundEndTime = null;
-          });
+              
+              // Redundancy
+              setTimeout(() => {
+                  if (lobbyRef.current) broadcastLobby(lobbyRef.current);
+              }, 1000);
+
+          }, 4000);
+
       } else {
           addToast("Erro: Evento não encontrado no Host.", 'error');
       }
   };
 
   const nextRound = (eventId: string) => {
-      startGame(eventId); // Reuse same logic
+      startGame(eventId);
   };
 
   const triggerForceFinish = () => {
       if (lobbyRef.current?.hostId !== user?.uid) return;
       updateHostState(l => {
           l.roundEndTime = Date.now() + 15000;
+      });
+  };
+
+  const forceEndRound = () => {
+      if (lobbyRef.current?.hostId !== user?.uid) return;
+      
+      updateHostState(l => {
+          l.players.forEach(p => {
+             if (!p.hasSubmitted) {
+                 p.hasSubmitted = true;
+                 p.lastRoundScore = 0;
+                 p.lastRoundDistance = 99999;
+             }
+          });
+          l.status = 'round_results';
       });
   };
 
@@ -356,7 +562,6 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
       if (!user) return;
       
       if (lobby?.hostId === user.uid) {
-          // Host updating self
           updateHostState(l => {
               const me = l.players.find(p => p.uid === user.uid);
               if (me) {
@@ -368,13 +573,6 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
               }
           });
 
-          // Host Check Auto End (Immediate)
-          // We need to check the updated state, which updateHostState handles via the callback copy
-          // But to be safe, we check 'lobbyRef.current' in the next tick or inside updateHostState
-          // Since updateHostState broadcasts, let's do a double check logic inside the updater if possible,
-          // OR checking inside updateHostState is hard.
-          // Easier: Just duplicate the check logic here for the Host's submission action.
-          
           setTimeout(() => {
               const current = lobbyRef.current;
               if (current && current.players.every(p => p.hasSubmitted)) {
@@ -383,7 +581,6 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
           }, 500);
 
       } else {
-          // Client sending to Host
           hostConnRef.current?.send({
               type: 'SUBMIT_SCORE',
               uid: user.uid,
@@ -398,13 +595,16 @@ export function MultiplayerProvider({ children }: { children?: React.ReactNode }
     <MultiplayerContext.Provider value={{ 
       lobby,
       currentEventData,
+      downloadProgress,
       isHost: lobby?.hostId === user?.uid,
       createLobby, 
       joinLobby, 
       leaveLobby, 
       startGame, 
+      requestEventData,
       submitRoundScore, 
       triggerForceFinish, 
+      forceEndRound,
       nextRound, 
       endMatch 
     }}>
