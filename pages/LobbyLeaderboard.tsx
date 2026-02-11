@@ -3,7 +3,7 @@ import { useMultiplayer } from '@/contexts/MultiplayerContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { mockStore } from '@/lib/store';
-import { Trophy, ArrowRight, StopCircle, Clock, Medal, AlertTriangle } from 'lucide-react';
+import { Trophy, ArrowRight, StopCircle, Clock, Medal, AlertTriangle, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '@/contexts/ToastContext';
 
@@ -13,14 +13,17 @@ export default function LobbyLeaderboard() {
     const navigate = useNavigate();
     const { addToast } = useToast();
 
+    const [isStarting, setIsStarting] = useState(false);
+
     // Redirect if lobby not in correct state
     useEffect(() => {
         if (!lobby) {
             navigate('/');
             return;
         }
-        if (lobby.status === 'playing') {
+        if (lobby.status === 'loading' || lobby.status === 'playing') {
             navigate('/jogar');
+            return;
         }
         if (lobby.status === 'finished') {
             // Wait 5s then leave
@@ -34,17 +37,20 @@ export default function LobbyLeaderboard() {
     const isHost = lobby?.hostId === user?.uid;
 
     const handleNext = async () => {
+         setIsStarting(true);
          // Pick random event (async)
          const allEvents = await mockStore.getEvents();
          const activeEvents = allEvents.filter(e => e.active);
          
          if (activeEvents.length === 0) {
             addToast("Nenhum evento disponível.", 'error');
+            setIsStarting(false);
             return;
          }
 
          const random = activeEvents[Math.floor(Math.random() * activeEvents.length)];
          nextRound(random.id);
+         // No need to set isStarting false, navigation will happen via effect
     };
 
     if (!lobby) return null;
@@ -123,9 +129,23 @@ export default function LobbyLeaderboard() {
                      </button>
                      <button 
                         onClick={handleNext}
-                        className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-3 rounded-xl font-bold shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2 animate-pulse"
+                        disabled={isStarting}
+                        className={clsx(
+                            "w-full sm:w-auto px-8 py-3 rounded-xl font-bold shadow-lg flex items-center justify-center gap-2 transition-all",
+                            isStarting 
+                                ? "bg-slate-700 text-slate-400 cursor-wait" 
+                                : "bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-900/20 animate-pulse"
+                        )}
                      >
-                        <ArrowRight className="w-5 h-5" /> Próximo Cenário
+                        {isStarting ? (
+                            <>
+                                <Loader2 className="w-5 h-5 animate-spin" /> Iniciando...
+                            </>
+                        ) : (
+                            <>
+                                <ArrowRight className="w-5 h-5" /> Próximo Cenário
+                            </>
+                        )}
                      </button>
                 </div>
             )}

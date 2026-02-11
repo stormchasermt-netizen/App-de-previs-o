@@ -4,6 +4,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
 import { useMultiplayer } from '@/contexts/MultiplayerContext';
 import { GameMap } from '@/components/GameMap';
+import { GameChat } from '@/components/GameChat';
 import { mockStore } from '@/lib/store';
 import {
   computeScore,
@@ -14,9 +15,11 @@ import type { PrevisaoEvent, PrevisaoDifficulty } from '@/lib/types';
 import { 
   Loader2, Send, Shuffle, Target, Map as MapIcon, 
   ChevronLeft, Lock, Trophy, RotateCcw,
-  Lightbulb, X, AlertCircle, Crosshair, ArrowLeft, ArrowRight, Settings, Users, Clock, Menu, ChevronDown, ListOrdered, ZoomIn, CheckCircle
+  Lightbulb, X, AlertCircle, Crosshair, ArrowLeft, ArrowRight, Settings, Users, Clock, Menu, ChevronDown, ListOrdered, ZoomIn, CheckCircle, Shield, PanelRightOpen, PanelRightClose
 } from 'lucide-react';
 import clsx from 'clsx';
+
+import { useWakeLock } from '@/hooks/useWakeLock';
 
 // Helper Icons
 function BookOpenIcon(props: any) { return <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>; }
@@ -40,24 +43,41 @@ export default function Game() {
   const { lobby, currentEventData, downloadProgress, submitRoundScore, triggerForceFinish, forceEndRound, requestEventData } = useMultiplayer();
   const navigate = useNavigate();
   
-  // Logic to determine if we are in multiplayer mode
-  const isMultiplayer = !!lobby && (lobby.status === 'playing' || lobby.status === 'round_results');
+  // Derived values (MUST be before useState that uses them)
+  const isMultiplayer = !!lobby && (lobby.status === 'playing' || lobby.status === 'round_results' || lobby.status === 'loading');
   const isHost = lobby?.hostId === user?.uid;
 
   // Data
   const [events, setEvents] = useState<PrevisaoEvent[]>([]);
   
   // State
-  const [phase, setPhase] = useState<GamePhase>(isMultiplayer ? 'loading' : 'setup');
+  const [phase, setPhase] = useState<GamePhase>(() => isMultiplayer ? 'loading' : 'setup');
   const [difficulty, setDifficulty] = useState<PrevisaoDifficulty>('iniciante');
   const [currentEvent, setCurrentEvent] = useState<PrevisaoEvent | null>(null);
+  
+  // Stability Hooks
+  useWakeLock();
+
+  // Prevent accidental tab close during game
+  useEffect(() => {
+      const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+          if (phase === 'playing' || phase === 'loading') {
+              e.preventDefault();
+              e.returnValue = '';
+              return '';
+          }
+      };
+      window.addEventListener('beforeunload', handleBeforeUnload);
+      return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [phase]);
   
   // Selection State
   const [selectedParamId, setSelectedParamId] = useState<string | null>('spc_temperature'); 
   const [timeIndex, setTimeIndex] = useState<number>(4); // 12Z
   const [showYear, setShowYear] = useState(false);
   const [showMobileParams, setShowMobileParams] = useState(false); // New Mobile State
-  
+  const [showPlayerList, setShowPlayerList] = useState(false); // New: Multiplayer Sidebar
+
   // Game Interaction
   const [forecast, setForecast] = useState<{ lat: number; lng: number } | null>(null);
   const [isTargetModalOpen, setIsTargetModalOpen] = useState(false);
@@ -77,6 +97,7 @@ export default function Game() {
   // Multiplayer Specific
   const [hasSubmittedMP, setHasSubmittedMP] = useState(false);
   const [roundTimer, setRoundTimer] = useState<number | null>(null);
+  const [loadingTimeLeft, setLoadingTimeLeft] = useState<number | null>(null);
   const [dataRetryCount, setDataRetryCount] = useState(0);
 
   // Load events initially (Only for Solo mode fallback)
@@ -102,6 +123,20 @@ export default function Game() {
       }
       return () => clearTimeout(timeout);
   }, [isMultiplayer, phase, currentEventData, dataRetryCount]);
+
+  // MULTIPLAYER: Sync Loading Timer
+  useEffect(() => {
+      if (isMultiplayer && lobby?.status === 'loading' && lobby.loadingStartTime) {
+          const timer = setInterval(() => {
+              const elapsed = Date.now() - lobby.loadingStartTime!;
+              const left = Math.max(0, 10 - Math.floor(elapsed / 1000));
+              setLoadingTimeLeft(left);
+          }, 200);
+          return () => clearInterval(timer);
+      } else {
+          setLoadingTimeLeft(null);
+      }
+  }, [isMultiplayer, lobby?.status, lobby?.loadingStartTime]);
 
   // MULTIPLAYER: Sync with Lobby Status & Event ID
   useEffect(() => {
@@ -134,12 +169,15 @@ export default function Game() {
                 setShowMobileParams(false);
                 setIsReferenceImageZoomed(false);
                 
-                setTimeout(() => setPhase('playing'), 1000);
+                setTimeout(() => setPhase('playing'), 500);
             }
         } else {
             // Lobby says playing, but we have no data. Stay in loading.
             if (phase !== 'loading') setPhase('loading');
         }
+    } else if (lobby && lobby.status === 'loading') {
+        // FORCE LOADING SCREEN if lobby is loading
+        if (phase !== 'loading') setPhase('loading');
     } 
 
     // 2. ROUND END SYNC
@@ -148,10 +186,27 @@ export default function Game() {
         if (phase !== 'result') {
             setPhase('result');
             setHasSubmittedMP(false); // Reset submit flag so we don't show "Waiting" overlay on result screen
+            setShowPlayerList(false); // Auto close sidebar on result
+
+            // SAFETY: If we transitioned to result but don't have a result object locally
+            // (e.g. Host forced end before we submitted), generate a dummy result so the screen renders.
+            if (!result) {
+                 setResult({
+                      finalScore: 0,
+                      precisionScore: 0,
+                      clusterScore: 0,
+                      reportsCaught: 0,
+                      distanceKm: 99999,
+                      streakCount: 0,
+                      minDistance: 99999
+                 });
+                 // We don't save to DB here because the Multiplayer logic likely already handled
+                 // the "zero" score submission via timeout or host enforcement.
+            }
         }
     }
 
-  }, [lobby, navigate, currentEvent, currentEventData, phase]);
+  }, [lobby, navigate, currentEvent, currentEventData, phase, result]);
 
   // MULTIPLAYER: Handle Round Timer (15s finish)
   useEffect(() => {
@@ -430,10 +485,31 @@ export default function Game() {
                 </p>
                 
                 {/* PROGRESS BAR FOR MULTIPLAYER */}
-                {isMultiplayer && downloadProgress > 0 && downloadProgress < 100 && (
-                    <div className="w-full bg-slate-900 rounded-full h-2.5 dark:bg-slate-900 mt-2 border border-white/10">
-                        <div className="bg-cyan-500 h-2.5 rounded-full transition-all duration-300" style={{ width: `${downloadProgress}%` }}></div>
-                        <p className="text-center text-xs text-cyan-400 mt-2 font-mono">{downloadProgress}%</p>
+                {isMultiplayer && (
+                    <div className="w-full mt-2 space-y-4">
+                        {/* Time Progress */}
+                         {loadingTimeLeft !== null && (
+                             <div className="text-center">
+                                 <div className="text-3xl font-black text-white mb-1 tracking-tighter">{loadingTimeLeft}s</div>
+                                 <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-white/10">
+                                    <div className="bg-emerald-500 h-full transition-all duration-200 ease-linear" style={{ width: `${Math.min(100, ((10 - loadingTimeLeft) / 10) * 100)}%` }}></div>
+                                 </div>
+                                 <p className="text-xs text-emerald-400 mt-1 uppercase tracking-wider font-bold">Iniciando Rodada</p>
+                             </div>
+                         )}
+
+                        {/* Download Progress - Only show if not complete */}
+                         {(downloadProgress < 100) && (
+                            <div className="space-y-1">
+                                <div className="flex justify-between text-[10px] text-slate-400 uppercase font-bold">
+                                    <span>Download</span>
+                                    <span>{downloadProgress}%</span>
+                                </div>
+                                <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden border border-white/5">
+                                    <div className="bg-cyan-500 h-full transition-all duration-300" style={{ width: `${downloadProgress}%` }}></div>
+                                </div>
+                            </div>
+                         )}
                     </div>
                 )}
              </div>
@@ -673,6 +749,26 @@ export default function Game() {
                      </button>
                 )}
 
+                {/* MULTIPLAYER PLAYER LIST TOGGLE */}
+                {isMultiplayer && lobby && (
+                    <button 
+                        onClick={() => setShowPlayerList(!showPlayerList)}
+                        className={clsx(
+                            "px-3 py-2 rounded-md text-sm font-bold flex items-center gap-2 transition-all border",
+                            showPlayerList 
+                                ? "bg-cyan-600 text-white border-cyan-400 shadow-[0_0_10px_cyan]" 
+                                : "bg-slate-700 hover:bg-slate-600 text-slate-300 border-white/10"
+                        )}
+                        title="Ver Jogadores"
+                    >
+                        <Users className="h-4 w-4" /> 
+                        <span className="hidden md:inline">Jogadores</span>
+                        <span className="bg-black/40 px-1.5 py-0.5 rounded text-[10px] ml-1">
+                            {lobby.players.filter(p => p.hasSubmitted).length}/{lobby.players.length}
+                        </span>
+                    </button>
+                )}
+
                 {/* Place Target Button - Opens Modal */}
                 <button 
                     onClick={openTargetModal}
@@ -769,7 +865,7 @@ export default function Game() {
         {/* MAIN CONTENT AREA */}
         <div className="flex-1 flex overflow-hidden relative">
             
-            {/* DESKTOP SIDEBAR */}
+            {/* DESKTOP SIDEBAR (Parameters) */}
             <aside className="hidden md:flex w-64 bg-[#0a0f1a] border-r border-white/5 flex-col z-10 shrink-0">
                 <div className="p-4 border-b border-white/5">
                     <h3 className="text-sm font-bold text-white flex items-center gap-2">
@@ -805,6 +901,64 @@ export default function Game() {
                     ))}
                 </div>
             </aside>
+
+            {/* RIGHT SIDEBAR (Multiplayer Player List) */}
+            {isMultiplayer && showPlayerList && lobby && (
+                <div className="absolute top-0 right-0 bottom-0 w-80 bg-slate-900/95 backdrop-blur-md border-l border-white/10 z-[500] flex flex-col shadow-2xl animate-in slide-in-from-right duration-300">
+                    <div className="p-4 border-b border-white/10 flex justify-between items-center bg-slate-950/50">
+                        <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                            <Users className="h-4 w-4 text-cyan-400" /> 
+                            Jogadores na Sala
+                        </h3>
+                        <button onClick={() => setShowPlayerList(false)} className="text-slate-400 hover:text-white">
+                            <PanelRightClose className="w-5 h-5" />
+                        </button>
+                    </div>
+                    
+                    <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-2">
+                        {lobby.players.sort((a,b) => (a.hasSubmitted === b.hasSubmitted) ? 0 : a.hasSubmitted ? -1 : 1).map(player => (
+                            <div key={player.uid} className={clsx("flex items-center gap-3 p-3 rounded-lg border transition-all", 
+                                player.hasSubmitted 
+                                    ? "bg-emerald-900/20 border-emerald-500/30" 
+                                    : "bg-slate-800/40 border-white/5"
+                            )}>
+                                <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold text-slate-300 overflow-hidden border border-white/10 shrink-0">
+                                    {player.photoURL ? <img src={player.photoURL} className="w-full h-full object-cover" /> : player.displayName[0]}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="text-sm font-bold text-white truncate flex items-center gap-1">
+                                        {player.displayName}
+                                        {player.isHost && <Shield className="w-3 h-3 text-amber-400" />}
+                                    </div>
+                                    <div className={clsx("text-xs font-medium", player.hasSubmitted ? "text-emerald-400" : "text-slate-500")}>
+                                        {player.hasSubmitted ? 'Previsão Enviada' : 'Analisando...'}
+                                    </div>
+                                </div>
+                                <div className="shrink-0">
+                                    {player.hasSubmitted ? (
+                                        <CheckCircle className="w-5 h-5 text-emerald-400" />
+                                    ) : (
+                                        <Clock className="w-5 h-5 text-slate-600 animate-pulse" />
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="p-4 border-t border-white/10 bg-slate-950/50 text-center">
+                        <div className="text-xs text-slate-400 mb-1">Status da Rodada</div>
+                        <div className="text-lg font-bold text-white">
+                            {lobby.players.filter(p => p.hasSubmitted).length} <span className="text-slate-500 font-normal">de</span> {lobby.players.length}
+                        </div>
+                        <div className="w-full bg-slate-800 h-1.5 rounded-full mt-2 overflow-hidden">
+                            <div 
+                                className="bg-emerald-500 h-full transition-all duration-500" 
+                                style={{ width: `${(lobby.players.filter(p => p.hasSubmitted).length / lobby.players.length) * 100}%` }}
+                            ></div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* MOBILE DROPDOWN PARAMETER MENU (OVERLAY) */}
             {showMobileParams && (
@@ -951,6 +1105,9 @@ export default function Game() {
                 </div>
             </div>
         )}
+
+        {/* IN-GAME CHAT (MULTIPLAYER ONLY) */}
+        {isMultiplayer && <GameChat />}
     </div>
   );
 }

@@ -13,10 +13,6 @@ export default function Login() {
     }
   }, [user, navigate]);
 
-  const handleGoogleLogin = () => {
-    loginWithGoogle();
-  };
-
   return (
     <div className="min-h-[70vh] flex items-center justify-center animate-in fade-in duration-700">
       <div className="w-full max-w-md bg-[#161b22] border border-white/10 rounded-2xl p-8 shadow-2xl relative overflow-hidden">
@@ -28,12 +24,12 @@ export default function Login() {
                 <CloudLightning className="h-10 w-10 text-white" />
             </div>
             <h1 className="text-3xl font-black text-white uppercase tracking-tight mb-2">Bem-vindo</h1>
-            <p className="text-slate-400 text-sm">Faça login para salvar seu progresso e acessar o ranking.</p>
+            <p className="text-slate-400 text-sm">Faça login com sua conta Google para salvar seu progresso.</p>
          </div>
 
-         <div className="space-y-4">
+         <div className="space-y-3">
             <button 
-                onClick={handleGoogleLogin}
+                onClick={() => loginWithGoogle()}
                 className="w-full bg-white hover:bg-slate-100 text-black p-4 rounded-xl flex items-center justify-center gap-3 transition-transform active:scale-95 font-bold shadow-xl"
             >
                 <img src="https://www.google.com/favicon.ico" alt="G" className="w-5 h-5" />

@@ -1,4 +1,5 @@
 
+
 export type UserType = 'user' | 'admin' | 'superadmin';
 
 export interface AppUser {
@@ -79,7 +80,7 @@ export interface PrevisaoScore {
 
 // MULTIPLAYER TYPES
 
-export type LobbyStatus = 'waiting' | 'playing' | 'round_results' | 'finished';
+export type LobbyStatus = 'waiting' | 'loading' | 'playing' | 'round_results' | 'finished';
 
 export interface LobbyPlayer {
   uid: string;
@@ -92,6 +93,16 @@ export interface LobbyPlayer {
   lastRoundScore: number;
   lastRoundDistance: number;
   streakCount: number;
+  loadProgress?: number; // 0-100% loading status
+}
+
+export interface ChatMessage {
+  id: string;
+  senderId: string;
+  senderName: string;
+  text: string;
+  timestamp: number;
+  isSystem?: boolean;
 }
 
 export interface Lobby {
@@ -101,6 +112,7 @@ export interface Lobby {
   players: LobbyPlayer[];
   currentEventId: string | null;
   difficulty: PrevisaoDifficulty;
+  loadingStartTime?: number; // Shared loading timer start
   roundEndTime: number | null; // Timestamp for forced finish
   roundsPlayed: number;
   createdAt: number;
